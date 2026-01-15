@@ -52,10 +52,12 @@ void save(const TRCONTEXT* context) {
     }
 }
 
-void showWindow(TRCONTEXT* context, LPARAM lParam) {
+// FIXED: Changed parameter to WPARAM to receive full 32-bit HWND ID
+void showWindow(TRCONTEXT* context, WPARAM callbackId) {
     for (int i = 0; i < context->iconIndex; i++)
     {
-        if (context->icons[i].icon.uID == HIWORD(lParam)) {
+        // FIXED: Compare directly against the ID passed in wParam
+        if (context->icons[i].icon.uID == (UINT)callbackId) {
             ShowWindow(context->icons[i].window, SW_SHOW);
             Shell_NotifyIcon(NIM_DELETE, &context->icons[i].icon);
             SetForegroundWindow(context->icons[i].window);
@@ -121,8 +123,14 @@ void minimizeToTray(TRCONTEXT* context, LONG_PTR restoreWindow) {
     nid.cbSize = sizeof(NOTIFYICONDATA);
     nid.hWnd = context->mainWindow;
     nid.hIcon = (HICON)icon;
-    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
-    nid.uVersion = NOTIFYICON_VERSION_4;
+
+    // FIXED: Removed NIF_SHOWTIP (Vista+) to ensure legacy compatibility
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+
+    // FIXED: Removed uVersion assignment. We want legacy behavior for these icons
+    // so that wParam returns the full 32-bit HWND.
+    // nid.uVersion = NOTIFYICON_VERSION_4; 
+
     nid.uID = (UINT)(UINT_PTR)currWin;
     nid.uCallbackMessage = WM_ICON;
     GetWindowText(currWin, nid.szTip, 128);
@@ -132,7 +140,9 @@ void minimizeToTray(TRCONTEXT* context, LONG_PTR restoreWindow) {
     context->iconIndex++;
 
     Shell_NotifyIcon(NIM_ADD, &nid);
-    Shell_NotifyIcon(NIM_SETVERSION, &nid);
+    // FIXED: Do not set version for these icons
+    // Shell_NotifyIcon(NIM_SETVERSION, &nid);
+
     ShowWindow(currWin, SW_HIDE);
 
     if (!restoreWindow) {
@@ -209,9 +219,6 @@ void startup(TRCONTEXT* context) {
         FILETIME saveFileWriteTime;
         GetFileTime(saveFile, NULL, NULL, &saveFileWriteTime);
 
-        // Logic for file time checking exists in original but wasn't fully utilized.
-        // Proceeding to read file content.
-
         DWORD charCount = fileSize / sizeof(wchar_t);
         std::vector<wchar_t> contents(charCount);
 
@@ -249,11 +256,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     switch (uMsg)
     {
     case WM_ICON:
-        if (LOWORD(lParam) == WM_LBUTTONDBLCLK) {
-            if (context) showWindow(context, lParam);
+        // FIXED: Legacy Mode Handling
+        // lParam holds the mouse message (e.g., WM_LBUTTONDBLCLK)
+        // wParam holds the ID (The HWND of the minimized window)
+        if (lParam == WM_LBUTTONDBLCLK) {
+            if (context) showWindow(context, wParam);
         }
         break;
     case WM_OURICON:
+        // Main App Icon uses Version 4 (as set in createTrayIcon)
+        // LOWORD(lParam) holds the mouse message
         if (LOWORD(lParam) == WM_RBUTTONUP) {
             SetForegroundWindow(hwnd);
             GetCursorPos(&pt);
@@ -290,12 +302,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nShowCmd) {
 #pragma warning( pop )
 
-    // FIXED: Use "new" to allocate on heap.
-    // The previous code had "*context = {}" here, which created a 98KB temporary 
-    // object on the stack to assign to the heap pointer, causing the warning.
     TRCONTEXT* context = new TRCONTEXT;
-
-    // We explicitly zero the memory on the heap.
     ZeroMemory(context, sizeof(TRCONTEXT));
 
     NOTIFYICONDATA icon = {};
