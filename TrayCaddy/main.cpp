@@ -43,15 +43,15 @@ void save(const TRCONTEXT* context) {
     for (int i = 0; i < context->iconIndex; i++)
     {
         if (context->icons[i].window) {
-            std::string str;
-            str = std::to_string((long)context->icons[i].window);
-            str += ',';
-            const char* handleString = str.c_str();
-            WriteFile(saveFile, handleString, strlen(handleString), &numbytes, NULL);
+            std::wstring str;
+            // Use to_wstring for Unicode string
+            str = std::to_wstring((LONG_PTR)context->icons[i].window);
+            str += L",";
+            const wchar_t* handleString = str.c_str();
+            // WriteFile writes bytes, so we multiply length by sizeof(wchar_t)
+            WriteFile(saveFile, handleString, (DWORD)(wcslen(handleString) * sizeof(wchar_t)), &numbytes, NULL);
         }
-
     }
-
 }
 
 // Restores a window
@@ -72,6 +72,7 @@ void showWindow(TRCONTEXT* context, LPARAM lParam) {
                     x++;
                 }
             }
+            // Logic remains valid for structs
             memcpy_s(context->icons, sizeof(context->icons), &temp.front(), sizeof(HIDDEN_WINDOW) * context->iconIndex);
             context->iconIndex--;
             save(context);
@@ -81,37 +82,38 @@ void showWindow(TRCONTEXT* context, LPARAM lParam) {
 }
 
 // Minimizes the current window to tray.
-// Uses currently focused window unless supplied a handle as the argument.
-void minimizeToTray(TRCONTEXT* context, long restoreWindow) {
+void minimizeToTray(TRCONTEXT* context, LONG_PTR restoreWindow) {
     // Taskbar and desktop windows are restricted from hiding.
-    const char restrictWins[][14] = { {"WorkerW"}, {"Shell_TrayWnd"} };
+    // Unicode: use wchar_t and L""
+    const wchar_t restrictWins[][14] = { {L"WorkerW"}, {L"Shell_TrayWnd"} };
 
     HWND currWin = 0;
     if (!restoreWindow) {
         currWin = GetForegroundWindow();
     }
     else {
-        currWin = reinterpret_cast<HWND>(restoreWindow);
+        currWin = (HWND)restoreWindow;
     }
 
     if (!currWin) {
         return;
     }
 
-    char className[256];
+    wchar_t className[256];
     if (!GetClassName(currWin, className, 256)) {
         return;
     }
     else {
         for (int i = 0; i < sizeof(restrictWins) / sizeof(*restrictWins); i++)
         {
-            if (strcmp(restrictWins[i], className) == 0) {
+            // Unicode comparison
+            if (wcscmp(restrictWins[i], className) == 0) {
                 return;
             }
         }
     }
     if (context->iconIndex == MAXIMUM_WINDOWS) {
-        MessageBox(NULL, "Error! Too many hidden windows. Please unhide some.", "Traymond", MB_OK | MB_ICONERROR);
+        MessageBox(NULL, L"Error! Too many hidden windows. Please unhide some.", L"Traymond", MB_OK | MB_ICONERROR);
         return;
     }
     ULONG_PTR icon = GetClassLongPtr(currWin, GCLP_HICONSM);
@@ -130,7 +132,7 @@ void minimizeToTray(TRCONTEXT* context, long restoreWindow) {
     nid.uVersion = NOTIFYICON_VERSION_4;
     nid.uID = LOWORD(reinterpret_cast<UINT>(currWin));
     nid.uCallbackMessage = WM_ICON;
-    GetWindowText(currWin, nid.szTip, 128);
+    GetWindowText(currWin, nid.szTip, 128); // Standard API maps to GetWindowTextW now
     context->icons[context->iconIndex].icon = nid;
     context->icons[context->iconIndex].window = currWin;
     context->iconIndex++;
@@ -140,7 +142,6 @@ void minimizeToTray(TRCONTEXT* context, long restoreWindow) {
     if (!restoreWindow) {
         save(context);
     }
-
 }
 
 // Adds our own icon to tray
@@ -152,7 +153,8 @@ void createTrayIcon(HWND mainWindow, HINSTANCE hInstance, NOTIFYICONDATA* icon) 
     icon->uVersion = NOTIFYICON_VERSION_4;
     icon->uID = reinterpret_cast<UINT>(mainWindow);
     icon->uCallbackMessage = WM_OURICON;
-    strcpy_s(icon->szTip, "Traymond");
+    // Unicode copy
+    wcscpy_s(icon->szTip, L"Traymond");
     Shell_NotifyIcon(NIM_ADD, icon);
     Shell_NotifyIcon(NIM_SETVERSION, icon);
 }
@@ -167,20 +169,22 @@ void createTrayMenu(HMENU* trayMenu) {
     exitMenuItem.cbSize = sizeof(MENUITEMINFO);
     exitMenuItem.fMask = MIIM_STRING | MIIM_ID;
     exitMenuItem.fType = MFT_STRING;
-    exitMenuItem.dwTypeData = "Exit";
+    // Cast away constness for legacy API, pointing to L"" string
+    exitMenuItem.dwTypeData = (LPWSTR)L"Exit";
     exitMenuItem.cch = 5;
     exitMenuItem.wID = EXIT_ID;
 
     showAllMenuItem.cbSize = sizeof(MENUITEMINFO);
     showAllMenuItem.fMask = MIIM_STRING | MIIM_ID;
     showAllMenuItem.fType = MFT_STRING;
-    showAllMenuItem.dwTypeData = "Restore all windows";
+    showAllMenuItem.dwTypeData = (LPWSTR)L"Restore all windows";
     showAllMenuItem.cch = 20;
     showAllMenuItem.wID = SHOW_ALL_ID;
 
     InsertMenuItem(*trayMenu, 0, FALSE, &showAllMenuItem);
     InsertMenuItem(*trayMenu, 0, FALSE, &exitMenuItem);
 }
+
 // Shows all hidden windows;
 void showAllWindows(TRCONTEXT* context) {
     for (int i = 0; i < context->iconIndex; i++)
@@ -199,14 +203,13 @@ void exitApp() {
 
 // Creates and reads the save file to restore hidden windows in case of unexpected termination
 void startup(TRCONTEXT* context) {
-    if ((saveFile = CreateFile("traymond.dat", GENERIC_READ | GENERIC_WRITE, \
+    // L"traymond.dat" for Unicode filename
+    if ((saveFile = CreateFile(L"traymond.dat", GENERIC_READ | GENERIC_WRITE, \
         0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)) == INVALID_HANDLE_VALUE) {
-        MessageBox(NULL, "Error! Traymond could not create a save file.", "Traymond", MB_OK | MB_ICONERROR);
+        MessageBox(NULL, L"Error! Traymond could not create a save file.", L"Traymond", MB_OK | MB_ICONERROR);
         exitApp();
     }
-    // Check if we've crashed (i. e. there is a save file) during current uptime and
-    // if there are windows to restore, in which case restore them and
-    // display a reassuring message.
+
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         DWORD numbytes;
         DWORD fileSize = GetFileSize(saveFile, NULL);
@@ -225,31 +228,37 @@ void startup(TRCONTEXT* context) {
             return;
         }
 
-        std::vector<char> contents = std::vector<char>(fileSize);
+        // Read into wchar_t buffer (fileSize is bytes, so we divide by sizeof(wchar_t) to get count)
+        // Note: This assumes the file was written as WideChars (which our save function now does)
+        DWORD charCount = fileSize / sizeof(wchar_t);
+        std::vector<wchar_t> contents(charCount);
+
         ReadFile(saveFile, &contents.front(), fileSize, &numbytes, NULL);
-        char handle[10];
+
+        wchar_t handle[32];
         int index = 0;
-        for (size_t i = 0; i < fileSize; i++)
+        for (size_t i = 0; i < charCount; i++)
         {
-            if (contents[i] != ',') {
+            if (contents[i] != L',') {
                 handle[index] = contents[i];
                 index++;
             }
             else {
+                handle[index] = L'\0';
                 index = 0;
-                minimizeToTray(context, std::stoi(std::string(handle)));
+                // stoll works on wstring automatically
+                minimizeToTray(context, std::stoll(std::wstring(handle)));
                 memset(handle, 0, sizeof(handle));
             }
         }
-        std::string restore_message = "Traymond had previously been terminated unexpectedly.\n\nRestored " + \
-            std::to_string(context->iconIndex) + (context->iconIndex > 1 ? " icons." : " icon.");
-        MessageBox(NULL, restore_message.c_str(), "Traymond", MB_OK);
+        std::wstring restore_message = L"Traymond had previously been terminated unexpectedly.\n\nRestored " + \
+            std::to_wstring(context->iconIndex) + (context->iconIndex > 1 ? L" icons." : L" icon.");
+        MessageBox(NULL, restore_message.c_str(), L"Traymond", MB_OK);
     }
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-
-    TRCONTEXT* context = reinterpret_cast<TRCONTEXT*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+    TRCONTEXT* context = (TRCONTEXT*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
     POINT pt;
     switch (uMsg)
     {
@@ -279,7 +288,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             }
         }
         break;
-    case WM_HOTKEY: // We only have one hotkey, so no need to check the message
+    case WM_HOTKEY:
         minimizeToTray(context, NULL);
         break;
     default:
@@ -290,26 +299,27 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
 #pragma warning( push )
 #pragma warning( disable : 4100 )
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
+// Changed to wWinMain for Unicode Entry Point
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nShowCmd) {
 #pragma warning( pop )
 
     TRCONTEXT context = {};
 
     NOTIFYICONDATA icon = {};
 
-    // Mutex to allow only one instance
-    const char szUniqueNamedMutex[] = "traymond_mutex";
+    // L prefix for Unicode literal
+    const wchar_t szUniqueNamedMutex[] = L"traymond_mutex";
     HANDLE mutex = CreateMutex(NULL, TRUE, szUniqueNamedMutex);
     if (GetLastError() == ERROR_ALREADY_EXISTS)
     {
-        MessageBox(NULL, "Error! Another instance of Traymond is already running.", "Traymond", MB_OK | MB_ICONERROR);
+        MessageBox(NULL, L"Error! Another instance of Traymond is already running.", L"Traymond", MB_OK | MB_ICONERROR);
         return 1;
     }
 
     BOOL bRet;
     MSG msg;
 
-    const char CLASS_NAME[] = "Traymond";
+    const wchar_t CLASS_NAME[] = L"Traymond";
 
     WNDCLASS wc = {};
     wc.lpfnWndProc = WindowProc;
@@ -320,17 +330,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 1;
     }
 
+    // Default to HWND_MESSAGE for message-only window
     context.mainWindow = CreateWindow(CLASS_NAME, NULL, NULL, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInstance, NULL);
 
     if (!context.mainWindow) {
         return 1;
     }
 
-    // Store our context in main window for retrieval by WindowProc
-    SetWindowLongPtr(context.mainWindow, GWLP_USERDATA, reinterpret_cast<LONG>(&context));
+    SetWindowLongPtr(context.mainWindow, GWLP_USERDATA, (LONG_PTR)&context);
 
     if (!RegisterHotKey(context.mainWindow, 0, MOD_KEY | MOD_NOREPEAT, TRAY_KEY)) {
-        MessageBox(NULL, "Error! Could not register the hotkey.", "Traymond", MB_OK | MB_ICONERROR);
+        MessageBox(NULL, L"Error! Could not register the hotkey.", L"Traymond", MB_OK | MB_ICONERROR);
         return 1;
     }
 
@@ -344,7 +354,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             DispatchMessage(&msg);
         }
     }
-    // Clean up on exit;
+
     showAllWindows(&context);
     Shell_NotifyIcon(NIM_DELETE, &icon);
     ReleaseMutex(mutex);
@@ -352,7 +362,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     CloseHandle(saveFile);
     DestroyMenu(context.trayMenu);
     DestroyWindow(context.mainWindow);
-    DeleteFile("traymond.dat"); // No save file means we have exited gracefully
+    DeleteFile(L"traymond.dat");
     UnregisterHotKey(context.mainWindow, 0);
-    return msg.wParam;
+    return (int)msg.wParam;
 }
