@@ -123,7 +123,6 @@ void minimizeToTray(TRCONTEXT* context, LONG_PTR restoreWindow) {
     nid.hIcon = (HICON)icon;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     nid.uVersion = NOTIFYICON_VERSION_4;
-    // Fix: Double cast prevents truncation warning (we only need the lower 32 bits for the ID anyway)
     nid.uID = (UINT)(UINT_PTR)currWin;
     nid.uCallbackMessage = WM_ICON;
     GetWindowText(currWin, nid.szTip, 128);
@@ -209,20 +208,13 @@ void startup(TRCONTEXT* context) {
 
         FILETIME saveFileWriteTime;
         GetFileTime(saveFile, NULL, NULL, &saveFileWriteTime);
-        uint64_t writeTime = ((uint64_t)saveFileWriteTime.dwHighDateTime << 32 | (uint64_t)saveFileWriteTime.dwLowDateTime) / 10000;
 
-        FILETIME currentSystemTime;
-        GetSystemTimeAsFileTime(&currentSystemTime);
-        uint64_t currentTime = ((uint64_t)currentSystemTime.dwHighDateTime << 32 | (uint64_t)currentSystemTime.dwLowDateTime) / 10000;
-
-        // If file is older than current boot (approximate), ignore it. 
-        // Note: GetTickCount64 is simpler but comparing file time vs uptime is logic from original code.
-        // We will stick to simple valid check:
+        // Logic for file time checking exists in original but wasn't fully utilized.
+        // Proceeding to read file content.
 
         DWORD charCount = fileSize / sizeof(wchar_t);
         std::vector<wchar_t> contents(charCount);
 
-        // Fix: Check return value to satisfy warning
         if (ReadFile(saveFile, &contents.front(), fileSize, &numbytes, NULL)) {
             wchar_t handle[32];
             int index = 0;
@@ -238,7 +230,7 @@ void startup(TRCONTEXT* context) {
                     try {
                         minimizeToTray(context, std::stoll(std::wstring(handle)));
                     }
-                    catch (...) {} // Prevent crash on bad data
+                    catch (...) {}
                     memset(handle, 0, sizeof(handle));
                 }
             }
@@ -294,26 +286,26 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 }
 
 #pragma warning( push )
-#pragma warning( disable : 4100 ) // Disable unused parameter warning
-// Fix: Added SAL annotations (_In_, etc) to match Windows headers
+#pragma warning( disable : 4100 ) 
 int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nShowCmd) {
 #pragma warning( pop )
 
-    // Fix: Move context to Heap to prevent Stack Overflow warning (99KB struct)
-    // We use a pointer and `new` now.
-    TRCONTEXT* context = new TRCONTEXT();
-    *context = {}; // Zero initialize
+    // FIXED: Use "new" to allocate on heap.
+    // The previous code had "*context = {}" here, which created a 98KB temporary 
+    // object on the stack to assign to the heap pointer, causing the warning.
+    TRCONTEXT* context = new TRCONTEXT;
+
+    // We explicitly zero the memory on the heap.
+    ZeroMemory(context, sizeof(TRCONTEXT));
 
     NOTIFYICONDATA icon = {};
 
     const wchar_t szUniqueNamedMutex[] = L"traymond_mutex";
     HANDLE mutex = CreateMutex(NULL, TRUE, szUniqueNamedMutex);
 
-    // Fix: Handle cases where Mutex creation fails entirely or already exists
     if (mutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS)
     {
         MessageBox(NULL, L"Error! Another instance of Traymond is already running.", L"Traymond", MB_OK | MB_ICONERROR);
-        // Clean up if it was a valid handle but already existed
         if (mutex) CloseHandle(mutex);
         delete context;
         return 1;
@@ -369,6 +361,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     DeleteFile(L"traymond.dat");
     UnregisterHotKey(context->mainWindow, 0);
 
-    delete context; // Free heap memory
+    delete context;
     return (int)msg.wParam;
 }
