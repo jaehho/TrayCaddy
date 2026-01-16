@@ -30,28 +30,27 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define WM_OURICON  0x1C0B
 #define HOTKEY_ID   1
 
+// Custom messages
+#define WM_UPDATE_HOTKEY (WM_USER + 1)
+#define WM_PAUSE_HOTKEY  (WM_USER + 2)
+#define WM_RESUME_HOTKEY (WM_USER + 3)
+
 // Control IDs
 #define ID_BTN_RESTORE_ALL  0x200
 #define ID_BTN_EXIT         0x201
 #define ID_LIST_WINDOWS     0x202
 #define ID_HK_CONTROL       0x203
-#define ID_BTN_APPLY_HK     0x205
+#define ID_LBL_CURRENT_HK   0x204
 
 #define ID_MENU_RESTORE_ALL 0x98
 #define ID_MENU_EXIT        0x99
 
 // --- DARKER COLOR PALETTE ---
-// Main Window Background (Deep Charcoal Blue)
 const COLORREF CLR_BG_DARK = RGB(40, 50, 65);
-// Button Color (Dark Teal)
 const COLORREF CLR_BTN_TEAL = RGB(0, 95, 105);
-// Button Pressed Color (Very Dark Teal)
 const COLORREF CLR_BTN_PRESSED = RGB(0, 70, 80);
-// Main Text Color (White for contrast)
 const COLORREF CLR_TEXT_WHITE = RGB(255, 255, 255);
-// List View Background (Slightly lighter than main BG for separation)
 const COLORREF CLR_LIST_BG = RGB(55, 65, 80);
-// List View Text (Off-White)
 const COLORREF CLR_LIST_TEXT = RGB(235, 235, 235);
 
 const std::wstring SAVE_FILE = L"TrayCaddy.dat";
@@ -83,11 +82,11 @@ struct APP_STATE {
 
     // GDI Objects
     HFONT hFontUi = nullptr;
-    HBRUSH hBrushBg = nullptr; // Brush for the main background color
+    HBRUSH hBrushBg = nullptr;
 
     // Hotkey Settings
     UINT hkModifiers = MOD_WIN | MOD_SHIFT;
-    UINT hkKey = 0x5A;
+    UINT hkKey = 0x5A; // Default Z
 };
 
 // --- Forward Declarations ---
@@ -132,6 +131,18 @@ std::wstring GetHotkeyString(UINT modifiers, UINT key) {
 
 LRESULT CALLBACK CustomHotkeySubclass(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     switch (uMsg) {
+
+        // --- FOCUS HANDLING TO PREVENT KEY MASKING ---
+        // When focused, tell parent to UNREGISTER the global hotkey so we can type it.
+    case WM_SETFOCUS:
+        PostMessage(GetParent(hWnd), WM_PAUSE_HOTKEY, 0, 0);
+        break;
+
+        // When focus lost, tell parent to RE-REGISTER the hotkey so it works again.
+    case WM_KILLFOCUS:
+        PostMessage(GetParent(hWnd), WM_RESUME_HOTKEY, 0, 0);
+        break;
+
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN: {
         UINT modifiers = 0;
@@ -155,24 +166,34 @@ LRESULT CALLBACK CustomHotkeySubclass(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         }
         return 0;
     }
-    case WM_CHAR: case WM_SYSCHAR: case WM_KEYUP: case WM_SYSKEYUP:
+
+                      // Handle Key Release to Trigger Update
+    case WM_KEYUP:
+    case WM_SYSKEYUP: {
+        CUSTOM_HOTKEY_DATA* data = (CUSTOM_HOTKEY_DATA*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+        // If we have a valid key recorded, tell the parent to update settings
+        if (data && data->vKey != 0) {
+            SendMessage(GetParent(hWnd), WM_UPDATE_HOTKEY, 0, 0);
+        }
         return 0;
-        // Paint the hotkey edit control background dark
+    }
+
+    case WM_CHAR: case WM_SYSCHAR:
+        return 0;
+
     case WM_ERASEBKGND: {
         HDC hdc = (HDC)wParam;
         RECT rc; GetClientRect(hWnd, &rc);
-        // Use the List BG color for edit box background contrast
         HBRUSH hBr = CreateSolidBrush(CLR_LIST_BG);
         FillRect(hdc, &rc, hBr);
         DeleteObject(hBr);
         return 1;
     }
-    case WM_CTLCOLORSTATIC: // For read-only edit control
+    case WM_CTLCOLORSTATIC:
     case WM_CTLCOLOREDIT: {
         HDC hdc = (HDC)wParam;
         SetTextColor(hdc, CLR_TEXT_WHITE);
         SetBkColor(hdc, CLR_LIST_BG);
-        // Return a brush for the background
         static HBRUSH hBrushEdit = CreateSolidBrush(CLR_LIST_BG);
         return (LRESULT)hBrushEdit;
     }
@@ -223,7 +244,8 @@ void LoadSettings(APP_STATE* state) {
 void UpdateAppHotkey(APP_STATE* state) {
     UnregisterHotKey(state->mainWindow, HOTKEY_ID);
     if (!RegisterHotKey(state->mainWindow, HOTKEY_ID, state->hkModifiers | MOD_NOREPEAT, state->hkKey)) {
-        MessageBox(state->mainWindow, L"Failed to register hotkey.", L"Error", MB_ICONWARNING);
+        // Silent fail or debug string
+        OutputDebugString(L"TrayCaddy: Failed to register hotkey.\n");
     }
 }
 
@@ -375,22 +397,16 @@ HFONT CreateModernFont(int pointSize, bool bold) {
         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 }
 
-// Draw a modern, dark teal, rounded button (with white corner fix)
 void DrawModernButton(LPDRAWITEMSTRUCT pDIS, const APP_STATE* state) {
     HDC hdc = pDIS->hDC;
     RECT rc = pDIS->rcItem;
     bool isPressed = (pDIS->itemState & ODS_SELECTED);
 
-    // --- FIX FOR CORNERS ---
-    // Fill the button bounding box with the window's dark background color first.
-    // This ensures the corners outside the rounded rectangle blend in.
     FillRect(hdc, &rc, state->hBrushBg);
 
-    // Setup GDI
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, CLR_TEXT_WHITE);
 
-    // Determine button color based on state using darker palette
     COLORREF btnColor = isPressed ? CLR_BTN_PRESSED : CLR_BTN_TEAL;
     HBRUSH hBr = CreateSolidBrush(btnColor);
     HPEN hPen = CreatePen(PS_SOLID, 1, btnColor);
@@ -398,18 +414,14 @@ void DrawModernButton(LPDRAWITEMSTRUCT pDIS, const APP_STATE* state) {
     HGDIOBJ oldBr = SelectObject(hdc, hBr);
     HGDIOBJ oldPen = SelectObject(hdc, hPen);
 
-    // Draw Rounded Rectangle
     RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
 
-    // Get Text
     wchar_t buf[256];
     GetWindowText(pDIS->hwndItem, buf, 256);
 
-    // Draw Text Centered (with slight offset if pressed)
     if (isPressed) OffsetRect(&rc, 1, 1);
     DrawText(hdc, buf, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    // Cleanup
     SelectObject(hdc, oldBr);
     SelectObject(hdc, oldPen);
     DeleteObject(hBr);
@@ -419,6 +431,12 @@ void DrawModernButton(LPDRAWITEMSTRUCT pDIS, const APP_STATE* state) {
 // --- Window Procedure ---
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     APP_STATE* state = (APP_STATE*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+
+    if (uMsg == WM_NCCREATE) {
+        CREATESTRUCT* pCreate = (CREATESTRUCT*)lParam;
+        state = (APP_STATE*)pCreate->lpCreateParams;
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)state);
+    }
 
     static UINT s_taskbarCreatedMsg = 0;
     if (s_taskbarCreatedMsg == 0) s_taskbarCreatedMsg = RegisterWindowMessage(L"TaskbarCreated");
@@ -438,7 +456,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         icex.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES;
         InitCommonControlsEx(&icex);
 
-        // Layout Constants
         const int margin = 20;
         const int winWidth = 450;
         const int winHeight = 400;
@@ -459,35 +476,37 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         lvc.pszText = (LPWSTR)L"Window Title";
         ListView_InsertColumn(hList, 0, &lvc);
 
-        // Modern Dark List Styles
         ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-        ListView_SetBkColor(hList, CLR_LIST_BG);     // Dark list background
-        ListView_SetTextBkColor(hList, CLR_LIST_BG); // Dark text background
-        ListView_SetTextColor(hList, CLR_LIST_TEXT); // Light text
+        ListView_SetBkColor(hList, CLR_LIST_BG);
+        ListView_SetTextBkColor(hList, CLR_LIST_BG);
+        ListView_SetTextColor(hList, CLR_LIST_TEXT);
 
         int currentY = margin + listHeight + 15;
 
         // 2. SETTINGS SECTION
         int rowHeight = 28;
 
-        // Header Label
-        CreateWindow(L"STATIC", L"Activation Hotkey", WS_CHILD | WS_VISIBLE | SS_LEFT,
-            margin, currentY, 200, 20, hwnd, NULL, GetModuleHandle(NULL), NULL);
+        std::wstring currentText = L"Current Hotkey: ";
+        if (state) currentText += GetHotkeyString(state->hkModifiers, state->hkKey);
+
+        CreateWindow(L"STATIC", currentText.c_str(),
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            margin, currentY, 300, 20,
+            hwnd, (HMENU)ID_LBL_CURRENT_HK, GetModuleHandle(NULL), NULL);
 
         currentY += 25;
 
-        // Hotkey Display (ReadOnly Edit)
-        // Note: Subclassing handles dark coloring for this
+        CreateWindow(L"STATIC", L"Type New Hotkey:",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            margin, currentY, 200, 20,
+            hwnd, NULL, GetModuleHandle(NULL), NULL);
+
+        currentY += 20;
+
         CreateWindow(L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER | ES_READONLY,
-            margin, currentY, 200, rowHeight,
+            margin, currentY, 250, rowHeight,
             hwnd, (HMENU)ID_HK_CONTROL, GetModuleHandle(NULL), NULL);
-
-        // Apply Button
-        CreateWindow(L"BUTTON", L"Apply",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
-            margin + 210, currentY, 80, rowHeight,
-            hwnd, (HMENU)ID_BTN_APPLY_HK, GetModuleHandle(NULL), NULL);
 
         // 3. FOOTER BUTTONS
         int btnWidth = 120;
@@ -516,9 +535,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
 
-                   // --- Modern Dark Rendering ---
-
-                   // Paint the Main Window Background Dark
     case WM_ERASEBKGND: {
         HDC hdc = (HDC)wParam;
         RECT rc;
@@ -527,7 +543,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         return 1;
     }
 
-                      // Handle Static Text Transparency (White text on dark background)
     case WM_CTLCOLORSTATIC: {
         HDC hdc = (HDC)wParam;
         SetBkMode(hdc, TRANSPARENT);
@@ -535,7 +550,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         return (LRESULT)state->hBrushBg;
     }
 
-                          // Draw Buttons manually
     case WM_DRAWITEM: {
         LPDRAWITEMSTRUCT pDIS = (LPDRAWITEMSTRUCT)lParam;
         if (pDIS->CtlType == ODT_BUTTON) {
@@ -545,7 +559,34 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         break;
     }
 
-                    // --- Logic Handlers ---
+                    // --- Automatic Update Logic ---
+    case WM_UPDATE_HOTKEY: {
+        if (!state || !state->hkControl) break;
+        CUSTOM_HOTKEY_DATA* data = (CUSTOM_HOTKEY_DATA*)GetWindowLongPtr(state->hkControl, GWLP_USERDATA);
+
+        if (data && data->vKey != 0) {
+            // Just update internal state and label. 
+            // DO NOT register here, or we mask the key again while typing.
+            state->hkKey = data->vKey;
+            state->hkModifiers = data->modifiers;
+
+            SaveSettings(state);
+
+            std::wstring newLabel = L"Current Hotkey: " + GetHotkeyString(state->hkModifiers, state->hkKey);
+            SetDlgItemText(hwnd, ID_LBL_CURRENT_HK, newLabel.c_str());
+        }
+        break;
+    }
+
+                         // Unregister so user can type the key into the box
+    case WM_PAUSE_HOTKEY:
+        if (state) UnregisterHotKey(state->mainWindow, HOTKEY_ID);
+        break;
+
+        // Re-register (activate) the key when focus leaves the box
+    case WM_RESUME_HOTKEY:
+        if (state) UpdateAppHotkey(state);
+        break;
 
     case WM_ICON:
         if (!state) break;
@@ -576,19 +617,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
         if (id == ID_BTN_RESTORE_ALL || id == ID_MENU_RESTORE_ALL) {
             RestoreAll(state);
-        }
-        else if (id == ID_BTN_APPLY_HK) {
-            CUSTOM_HOTKEY_DATA* data = (CUSTOM_HOTKEY_DATA*)GetWindowLongPtr(state->hkControl, GWLP_USERDATA);
-            if (data && data->vKey != 0) {
-                state->hkKey = data->vKey;
-                state->hkModifiers = data->modifiers;
-                UpdateAppHotkey(state);
-                SaveSettings(state);
-                MessageBox(hwnd, L"Hotkey updated successfully.", L"TrayCaddy", MB_OK);
-            }
-            else {
-                MessageBox(hwnd, L"Please enter a valid key combination.", L"Info", MB_OK);
-            }
         }
         break;
     }
@@ -643,9 +671,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     APP_STATE* appState = new APP_STATE();
     LoadSettings(appState);
 
-    // Create Modern Resources
     appState->hFontUi = CreateModernFont(10, false);
-    // Use the new darker background color for the main window brush
     appState->hBrushBg = CreateSolidBrush(CLR_BG_DARK);
 
     const wchar_t CLASS_NAME[] = L"TrayCaddy";
@@ -661,7 +687,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     appState->mainWindow = CreateWindow(CLASS_NAME, L"TrayCaddy",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT, 450, 400,
-        NULL, NULL, hInstance, NULL);
+        NULL, NULL, hInstance, appState);
 
     if (!appState->mainWindow) {
         if (hMutex) CloseHandle(hMutex);
@@ -669,7 +695,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
         return 1;
     }
 
-    SetWindowLongPtr(appState->mainWindow, GWLP_USERDATA, (LONG_PTR)appState);
     appState->listView = GetDlgItem(appState->mainWindow, ID_LIST_WINDOWS);
     appState->hkControl = GetDlgItem(appState->mainWindow, ID_HK_CONTROL);
 
@@ -695,7 +720,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     UnregisterHotKey(appState->mainWindow, HOTKEY_ID);
     if (appState->trayMenu) DestroyMenu(appState->trayMenu);
 
-    // Cleanup Resources
     if (appState->hFontUi) DeleteObject(appState->hFontUi);
     if (appState->hBrushBg) DeleteObject(appState->hBrushBg);
 
