@@ -2,7 +2,7 @@
 #define UNICODE
 #endif
 
-// --- Enable Visual Styles (Modern Look) ---
+// --- Enable Visual Styles ---
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -11,11 +11,10 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #include <windowsx.h>
 #include <shellapi.h>
 #include <commctrl.h> 
-#include <ShellScalingApi.h> // For DPI Awareness
+#include <ShellScalingApi.h>
 #include <string>
 #include <vector>
 #include <fstream>
-#include <sstream>
 #include <algorithm>
 #include <filesystem>
 
@@ -23,9 +22,10 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "comctl32.lib") 
-#pragma comment(lib, "Shcore.lib") // Required for DPI scaling
+#pragma comment(lib, "Shcore.lib")
+#pragma comment(lib, "Gdi32.lib") 
 
-// --- Constants ---
+// --- Constants & Colors ---
 #define WM_ICON     0x1C0A
 #define WM_OURICON  0x1C0B
 #define HOTKEY_ID   1
@@ -36,10 +36,23 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_LIST_WINDOWS     0x202
 #define ID_HK_CONTROL       0x203
 #define ID_BTN_APPLY_HK     0x205
-#define ID_GRP_SETTINGS     0x206 // New Group Box ID
 
 #define ID_MENU_RESTORE_ALL 0x98
 #define ID_MENU_EXIT        0x99
+
+// --- DARKER COLOR PALETTE ---
+// Main Window Background (Deep Charcoal Blue)
+const COLORREF CLR_BG_DARK = RGB(40, 50, 65);
+// Button Color (Dark Teal)
+const COLORREF CLR_BTN_TEAL = RGB(0, 95, 105);
+// Button Pressed Color (Very Dark Teal)
+const COLORREF CLR_BTN_PRESSED = RGB(0, 70, 80);
+// Main Text Color (White for contrast)
+const COLORREF CLR_TEXT_WHITE = RGB(255, 255, 255);
+// List View Background (Slightly lighter than main BG for separation)
+const COLORREF CLR_LIST_BG = RGB(55, 65, 80);
+// List View Text (Off-White)
+const COLORREF CLR_LIST_TEXT = RGB(235, 235, 235);
 
 const std::wstring SAVE_FILE = L"TrayCaddy.dat";
 const std::wstring SETTINGS_FILE = L"TrayCaddy.ini";
@@ -67,7 +80,10 @@ struct APP_STATE {
     std::vector<HIDDEN_WINDOW> hiddenWindows;
     UINT nextHiddenIconId = 1000;
     NOTIFYICONDATA mainIcon = { 0 };
-    HFONT hFont = nullptr;
+
+    // GDI Objects
+    HFONT hFontUi = nullptr;
+    HBRUSH hBrushBg = nullptr; // Brush for the main background color
 
     // Hotkey Settings
     UINT hkModifiers = MOD_WIN | MOD_SHIFT;
@@ -87,9 +103,9 @@ void InitTrayMenu(HMENU* trayMenu);
 void LoadState(APP_STATE* state);
 void ReaddHiddenIcons(APP_STATE* state);
 void UpdateListView(APP_STATE* state);
-HFONT GetModernFont();
+HFONT CreateModernFont(int pointSize, bool bold);
 
-// --- Custom Hotkey Control Implementation ---
+// --- Custom Hotkey Control ---
 
 std::wstring GetHotkeyString(UINT modifiers, UINT key) {
     std::wstring text = L"";
@@ -141,6 +157,25 @@ LRESULT CALLBACK CustomHotkeySubclass(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
     }
     case WM_CHAR: case WM_SYSCHAR: case WM_KEYUP: case WM_SYSKEYUP:
         return 0;
+        // Paint the hotkey edit control background dark
+    case WM_ERASEBKGND: {
+        HDC hdc = (HDC)wParam;
+        RECT rc; GetClientRect(hWnd, &rc);
+        // Use the List BG color for edit box background contrast
+        HBRUSH hBr = CreateSolidBrush(CLR_LIST_BG);
+        FillRect(hdc, &rc, hBr);
+        DeleteObject(hBr);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC: // For read-only edit control
+    case WM_CTLCOLOREDIT: {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, CLR_TEXT_WHITE);
+        SetBkColor(hdc, CLR_LIST_BG);
+        // Return a brush for the background
+        static HBRUSH hBrushEdit = CreateSolidBrush(CLR_LIST_BG);
+        return (LRESULT)hBrushEdit;
+    }
     case WM_NCDESTROY:
         CUSTOM_HOTKEY_DATA* data = (CUSTOM_HOTKEY_DATA*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
         if (data) delete data;
@@ -328,11 +363,57 @@ void LoadState(APP_STATE* state) {
     UpdateListView(state);
 }
 
-HFONT GetModernFont() {
-    NONCLIENTMETRICS ncm = { sizeof(NONCLIENTMETRICS) };
-    SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICS), &ncm, 0);
-    // Create a slightly larger font for better readability if desired, or keep default
-    return CreateFontIndirect(&ncm.lfMessageFont);
+// --- Visual & Helper Functions ---
+
+HFONT CreateModernFont(int pointSize, bool bold) {
+    HDC hdc = GetDC(NULL);
+    LONG height = -MulDiv(pointSize, GetDeviceCaps(hdc, LOGPIXELSY), 72);
+    ReleaseDC(NULL, hdc);
+
+    return CreateFont(height, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+}
+
+// Draw a modern, dark teal, rounded button (with white corner fix)
+void DrawModernButton(LPDRAWITEMSTRUCT pDIS, const APP_STATE* state) {
+    HDC hdc = pDIS->hDC;
+    RECT rc = pDIS->rcItem;
+    bool isPressed = (pDIS->itemState & ODS_SELECTED);
+
+    // --- FIX FOR CORNERS ---
+    // Fill the button bounding box with the window's dark background color first.
+    // This ensures the corners outside the rounded rectangle blend in.
+    FillRect(hdc, &rc, state->hBrushBg);
+
+    // Setup GDI
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, CLR_TEXT_WHITE);
+
+    // Determine button color based on state using darker palette
+    COLORREF btnColor = isPressed ? CLR_BTN_PRESSED : CLR_BTN_TEAL;
+    HBRUSH hBr = CreateSolidBrush(btnColor);
+    HPEN hPen = CreatePen(PS_SOLID, 1, btnColor);
+
+    HGDIOBJ oldBr = SelectObject(hdc, hBr);
+    HGDIOBJ oldPen = SelectObject(hdc, hPen);
+
+    // Draw Rounded Rectangle
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
+
+    // Get Text
+    wchar_t buf[256];
+    GetWindowText(pDIS->hwndItem, buf, 256);
+
+    // Draw Text Centered (with slight offset if pressed)
+    if (isPressed) OffsetRect(&rc, 1, 1);
+    DrawText(hdc, buf, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    // Cleanup
+    SelectObject(hdc, oldBr);
+    SelectObject(hdc, oldPen);
+    DeleteObject(hBr);
+    DeleteObject(hPen);
 }
 
 // --- Window Procedure ---
@@ -341,6 +422,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
     static UINT s_taskbarCreatedMsg = 0;
     if (s_taskbarCreatedMsg == 0) s_taskbarCreatedMsg = RegisterWindowMessage(L"TaskbarCreated");
+
     if (s_taskbarCreatedMsg != 0 && uMsg == s_taskbarCreatedMsg) {
         if (state) {
             InitTrayIcon(hwnd, GetModuleHandle(NULL), &state->mainIcon);
@@ -357,70 +439,69 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         InitCommonControlsEx(&icex);
 
         // Layout Constants
-        const int margin = 15;
-        const int winWidth = 400;  // Slightly wider
-        const int rowHeight = 25;
-        const int btnHeight = 30;
+        const int margin = 20;
+        const int winWidth = 450;
+        const int winHeight = 400;
 
-        int currentY = margin;
+        SetWindowPos(hwnd, NULL, 0, 0, winWidth, winHeight, SWP_NOMOVE | SWP_NOZORDER);
 
-        // 1. LIST VIEW (Full width minus margins)
-        int listHeight = 180;
+        // 1. LIST VIEW 
+        int listHeight = 220;
         HWND hList = CreateWindow(WC_LISTVIEW, L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-            margin, currentY, winWidth - (margin * 2), listHeight,
+            margin, margin, winWidth - (margin * 2 + 15), listHeight,
             hwnd, (HMENU)ID_LIST_WINDOWS, GetModuleHandle(NULL), NULL);
 
         LVCOLUMN lvc;
         lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT;
         lvc.fmt = LVCFMT_LEFT;
-        lvc.cx = winWidth - (margin * 2) - 4; // Adjust for scrollbar
+        lvc.cx = winWidth - (margin * 2) - 40;
         lvc.pszText = (LPWSTR)L"Window Title";
         ListView_InsertColumn(hList, 0, &lvc);
-        ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
 
-        currentY += listHeight + margin;
+        // Modern Dark List Styles
+        ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        ListView_SetBkColor(hList, CLR_LIST_BG);     // Dark list background
+        ListView_SetTextBkColor(hList, CLR_LIST_BG); // Dark text background
+        ListView_SetTextColor(hList, CLR_LIST_TEXT); // Light text
 
-        // 2. SETTINGS GROUP BOX
-        int grpHeight = 65;
-        CreateWindow(L"BUTTON", L"Settings",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            margin, currentY, winWidth - (margin * 2), grpHeight,
-            hwnd, (HMENU)ID_GRP_SETTINGS, GetModuleHandle(NULL), NULL);
+        int currentY = margin + listHeight + 15;
 
-        // Coordinates inside the group box context
-        int grpInnerY = currentY + 25;
-        int grpInnerX = margin + 15;
-        int grpContentWidth = winWidth - (margin * 2) - 30;
+        // 2. SETTINGS SECTION
+        int rowHeight = 28;
 
-        // Label: "Trigger Hotkey:"
-        CreateWindow(L"STATIC", L"Tray Hotkey:", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-            grpInnerX, grpInnerY, 80, rowHeight, hwnd, NULL, GetModuleHandle(NULL), NULL);
+        // Header Label
+        CreateWindow(L"STATIC", L"Activation Hotkey", WS_CHILD | WS_VISIBLE | SS_LEFT,
+            margin, currentY, 200, 20, hwnd, NULL, GetModuleHandle(NULL), NULL);
 
-        // Hotkey Edit Box
+        currentY += 25;
+
+        // Hotkey Display (ReadOnly Edit)
+        // Note: Subclassing handles dark coloring for this
         CreateWindow(L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER | ES_READONLY,
-            grpInnerX + 85, grpInnerY, 190, rowHeight,
+            margin, currentY, 200, rowHeight,
             hwnd, (HMENU)ID_HK_CONTROL, GetModuleHandle(NULL), NULL);
 
         // Apply Button
         CreateWindow(L"BUTTON", L"Apply",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            grpInnerX + 85 + 190 + 10, grpInnerY, 60, rowHeight,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
+            margin + 210, currentY, 80, rowHeight,
             hwnd, (HMENU)ID_BTN_APPLY_HK, GetModuleHandle(NULL), NULL);
 
-        currentY += grpHeight + margin;
+        // 3. FOOTER BUTTONS
+        int btnWidth = 120;
+        int btnHeight = 35;
+        int bottomY = winHeight - btnHeight - 45;
 
-        // 3. ACTION BUTTONS (Bottom aligned)
-        int btnWidth = 110;
         CreateWindow(L"BUTTON", L"Restore All",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            margin, currentY, btnWidth, btnHeight,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
+            margin, bottomY, btnWidth, btnHeight,
             hwnd, (HMENU)ID_BTN_RESTORE_ALL, GetModuleHandle(NULL), NULL);
 
         CreateWindow(L"BUTTON", L"Exit",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            winWidth - btnWidth - margin, currentY, btnWidth, btnHeight,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
+            winWidth - btnWidth - margin - 15, bottomY, btnWidth, btnHeight,
             hwnd, (HMENU)ID_BTN_EXIT, GetModuleHandle(NULL), NULL);
 
         return 0;
@@ -434,6 +515,37 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             }, (LPARAM)hFont);
         return 0;
     }
+
+                   // --- Modern Dark Rendering ---
+
+                   // Paint the Main Window Background Dark
+    case WM_ERASEBKGND: {
+        HDC hdc = (HDC)wParam;
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect(hdc, &rc, state->hBrushBg);
+        return 1;
+    }
+
+                      // Handle Static Text Transparency (White text on dark background)
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wParam;
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, CLR_TEXT_WHITE);
+        return (LRESULT)state->hBrushBg;
+    }
+
+                          // Draw Buttons manually
+    case WM_DRAWITEM: {
+        LPDRAWITEMSTRUCT pDIS = (LPDRAWITEMSTRUCT)lParam;
+        if (pDIS->CtlType == ODT_BUTTON) {
+            DrawModernButton(pDIS, state);
+            return TRUE;
+        }
+        break;
+    }
+
+                    // --- Logic Handlers ---
 
     case WM_ICON:
         if (!state) break;
@@ -509,17 +621,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if (state && wParam == HOTKEY_ID) MinimizeToTray(state, NULL);
         break;
 
-        // --- Paint Handling for Polish ---
-    case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLORBTN:
-    {
-        // Make text labels transparent so they don't have a gray box background
-        // on the white window.
-        HDC hdc = (HDC)wParam;
-        SetBkMode(hdc, TRANSPARENT);
-        return (LRESULT)GetStockObject(WHITE_BRUSH);
-    }
-
     default:
         return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
@@ -531,7 +632,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     UNREFERENCED_PARAMETER(lpCmdLine);
     UNREFERENCED_PARAMETER(nShowCmd);
 
-    // --- ENABLE HIGH DPI AWARENESS (Critical for modern screens) ---
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     HANDLE hMutex = CreateMutex(NULL, TRUE, L"TrayCaddy_Unique_Mutex");
@@ -542,25 +642,25 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
 
     APP_STATE* appState = new APP_STATE();
     LoadSettings(appState);
-    appState->hFont = GetModernFont();
+
+    // Create Modern Resources
+    appState->hFontUi = CreateModernFont(10, false);
+    // Use the new darker background color for the main window brush
+    appState->hBrushBg = CreateSolidBrush(CLR_BG_DARK);
 
     const wchar_t CLASS_NAME[] = L"TrayCaddy";
     WNDCLASS wc = { 0 };
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = CLASS_NAME;
-    wc.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    wc.hbrBackground = appState->hBrushBg;
     wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101));
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClass(&wc);
 
-    // Calculate window size (Wider and Taller)
-    int width = 430; // 400 content + borders
-    int height = 360;
-
     appState->mainWindow = CreateWindow(CLASS_NAME, L"TrayCaddy",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, width, height,
+        CW_USEDEFAULT, CW_USEDEFAULT, 450, 400,
         NULL, NULL, hInstance, NULL);
 
     if (!appState->mainWindow) {
@@ -574,7 +674,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     appState->hkControl = GetDlgItem(appState->mainWindow, ID_HK_CONTROL);
 
     MakeCustomHotkeyControl(appState->hkControl, appState->hkModifiers, appState->hkKey);
-    SendMessage(appState->mainWindow, WM_SETFONT, (WPARAM)appState->hFont, TRUE);
+
+    SendMessage(appState->mainWindow, WM_SETFONT, (WPARAM)appState->hFontUi, TRUE);
 
     InitTrayIcon(appState->mainWindow, hInstance, &appState->mainIcon);
     InitTrayMenu(&appState->trayMenu);
@@ -593,7 +694,11 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     Shell_NotifyIcon(NIM_DELETE, &appState->mainIcon);
     UnregisterHotKey(appState->mainWindow, HOTKEY_ID);
     if (appState->trayMenu) DestroyMenu(appState->trayMenu);
-    if (appState->hFont) DeleteObject(appState->hFont);
+
+    // Cleanup Resources
+    if (appState->hFontUi) DeleteObject(appState->hFontUi);
+    if (appState->hBrushBg) DeleteObject(appState->hBrushBg);
+
     if (hMutex) CloseHandle(hMutex);
     delete appState;
 
