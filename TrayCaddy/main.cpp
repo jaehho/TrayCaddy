@@ -58,9 +58,11 @@ void showWindow(TRCONTEXT* context, WPARAM callbackId) {
     {
         // FIXED: Compare directly against the ID passed in wParam
         if (context->icons[i].icon.uID == (UINT)callbackId) {
-            ShowWindow(context->icons[i].window, SW_SHOW);
+            if (context->icons[i].window && IsWindow(context->icons[i].window)) {
+                ShowWindow(context->icons[i].window, SW_SHOW);
+                SetForegroundWindow(context->icons[i].window);
+            }
             Shell_NotifyIcon(NIM_DELETE, &context->icons[i].icon);
-            SetForegroundWindow(context->icons[i].window);
             context->icons[i] = {};
 
             std::vector<HIDDEN_WINDOW> temp(context->iconIndex);
@@ -97,6 +99,10 @@ void minimizeToTray(TRCONTEXT* context, LONG_PTR restoreWindow) {
     }
 
     if (!currWin) {
+        return;
+    }
+
+    if (!IsWindow(currWin)) {
         return;
     }
 
@@ -141,13 +147,15 @@ void minimizeToTray(TRCONTEXT* context, LONG_PTR restoreWindow) {
     nid.uCallbackMessage = WM_ICON;
     GetWindowText(currWin, nid.szTip, 128);
 
+    if (!Shell_NotifyIcon(NIM_ADD, &nid)) {
+        return;
+    }
+    // FIXED: Do not set version for these icons
+    // Shell_NotifyIcon(NIM_SETVERSION, &nid);
+
     context->icons[context->iconIndex].icon = nid;
     context->icons[context->iconIndex].window = currWin;
     context->iconIndex++;
-
-    Shell_NotifyIcon(NIM_ADD, &nid);
-    // FIXED: Do not set version for these icons
-    // Shell_NotifyIcon(NIM_SETVERSION, &nid);
 
     ShowWindow(currWin, SW_HIDE);
 
@@ -165,8 +173,9 @@ void createTrayIcon(HWND mainWindow, HINSTANCE hInstance, NOTIFYICONDATA* icon) 
     icon->uID = (UINT)(UINT_PTR)mainWindow;
     icon->uCallbackMessage = WM_OURICON;
     wcscpy_s(icon->szTip, L"TrayCaddy");
-    Shell_NotifyIcon(NIM_ADD, icon);
-    Shell_NotifyIcon(NIM_SETVERSION, icon);
+    if (Shell_NotifyIcon(NIM_ADD, icon)) {
+        Shell_NotifyIcon(NIM_SETVERSION, icon);
+    }
 }
 
 void createTrayMenu(HMENU* trayMenu) {
@@ -194,7 +203,9 @@ void createTrayMenu(HMENU* trayMenu) {
 void showAllWindows(TRCONTEXT* context) {
     for (int i = 0; i < context->iconIndex; i++)
     {
-        ShowWindow(context->icons[i].window, SW_SHOW);
+        if (context->icons[i].window && IsWindow(context->icons[i].window)) {
+            ShowWindow(context->icons[i].window, SW_SHOW);
+        }
         Shell_NotifyIcon(NIM_DELETE, &context->icons[i].icon);
         context->icons[i] = {};
     }
@@ -229,23 +240,29 @@ void startup(TRCONTEXT* context) {
         std::vector<wchar_t> contents(charCount);
 
         if (ReadFile(saveFile, &contents.front(), fileSize, &numbytes, NULL)) {
-            wchar_t handle[32];
-            int index = 0;
+            std::wstring handle;
             for (size_t i = 0; i < charCount; i++)
             {
                 if (contents[i] != L',') {
-                    handle[index] = contents[i];
-                    index++;
+                    handle += contents[i];
                 }
                 else {
-                    handle[index] = L'\0';
-                    index = 0;
-                    try {
-                        minimizeToTray(context, std::stoll(std::wstring(handle)));
+                    if (!handle.empty()) {
+                        try {
+                            minimizeToTray(context, std::stoll(handle));
+                        }
+                        catch (...) {}
+                        handle.clear();
                     }
-                    catch (...) {}
-                    memset(handle, 0, sizeof(handle));
                 }
+            }
+
+            if (!handle.empty()) {
+                try {
+                    minimizeToTray(context, std::stoll(handle));
+                }
+                catch (...) {}
+                handle.clear();
             }
             if (context->iconIndex > 0) {
                 std::wstring restore_message = L"TrayCaddy had previously been terminated unexpectedly.\n\nRestored " + \
@@ -310,6 +327,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
 
     TRCONTEXT* context = new TRCONTEXT;
     ZeroMemory(context, sizeof(TRCONTEXT));
+
+    saveFile = INVALID_HANDLE_VALUE;
 
     NOTIFYICONDATA icon = {};
 
