@@ -2,9 +2,15 @@
 #define UNICODE
 #endif
 
+// --- Enable Visual Styles (Modern Look) ---
+#pragma comment(linker,"\"/manifestdependency:type='win32' \
+name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
+processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+
 #include <Windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
+#include <commctrl.h> // Required for ListView
 #include <string>
 #include <vector>
 #include <fstream>
@@ -12,11 +18,12 @@
 #include <algorithm>
 #include <filesystem>
 
-// Link necessary libraries automatically
+// Link necessary libraries
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "comctl32.lib") // Required for InitCommonControlsEx
 
-// --- Constants & Definitions ---
+// --- Constants ---
 #define VK_Z_KEY 0x5A
 #define TRAY_KEY VK_Z_KEY
 #define MOD_KEY (MOD_WIN | MOD_SHIFT)
@@ -24,54 +31,57 @@
 #define WM_ICON     0x1C0A
 #define WM_OURICON  0x1C0B
 
+// Control IDs
 #define ID_BTN_RESTORE_ALL  0x200
 #define ID_BTN_EXIT         0x201
+#define ID_LIST_WINDOWS     0x202
+
 #define ID_MENU_RESTORE_ALL 0x98
 #define ID_MENU_EXIT        0x99
 
-// File name for persistence
 const std::wstring SAVE_FILE = L"TrayCaddy.dat";
 
 // --- Data Structures ---
 struct HIDDEN_WINDOW {
-    NOTIFYICONDATA icon = { 0 }; // Initialize to zero
-    HWND window = nullptr;       // Initialize to null
+    NOTIFYICONDATA icon = { 0 };
+    HWND window = nullptr;
     UINT iconId = 0;
+    std::wstring title; // Store title for list view
 };
 
 struct APP_STATE {
-    HWND mainWindow = nullptr;   // FIX: Initialize member
-    HMENU trayMenu = nullptr;    // FIX: Initialize member
+    HWND mainWindow = nullptr;
+    HWND listView = nullptr; // Handle to the list control
+    HMENU trayMenu = nullptr;
     std::vector<HIDDEN_WINDOW> hiddenWindows;
     UINT nextHiddenIconId = 1000;
     NOTIFYICONDATA mainIcon = { 0 };
+    HFONT hFont = nullptr; // Font handle
 };
 
 // --- Forward Declarations ---
 void SaveState(const APP_STATE* state);
-void RestoreWindow(APP_STATE* state, WPARAM callbackId);
+void RestoreWindow(APP_STATE* state, UINT iconId);
 void RestoreAll(APP_STATE* state);
 void MinimizeToTray(APP_STATE* state, HWND targetWindow = NULL);
 void InitTrayIcon(HWND hWnd, HINSTANCE hInstance, NOTIFYICONDATA* icon);
 void InitTrayMenu(HMENU* trayMenu);
 void LoadState(APP_STATE* state);
 void ReaddHiddenIcons(APP_STATE* state);
+void UpdateListView(APP_STATE* state);
+HFONT GetModernFont();
 
-// --- Implementation ---
+// --- Logic Implementation ---
 
-// Save logic: Only create file if windows are hidden. Delete if empty.
 void SaveState(const APP_STATE* state) {
     if (state->hiddenWindows.empty()) {
         DeleteFile(SAVE_FILE.c_str());
         return;
     }
-
     std::wofstream file(SAVE_FILE, std::ios::trunc);
     if (!file.is_open()) return;
-
     for (const auto& item : state->hiddenWindows) {
         if (item.window && IsWindow(item.window)) {
-            // Cast HWND to generic integer for storage
             file << (uintptr_t)item.window << L"\n";
         }
     }
@@ -80,6 +90,7 @@ void SaveState(const APP_STATE* state) {
 void ReaddHiddenIcons(APP_STATE* state) {
     if (!state) return;
 
+    // Clean invalid windows first
     state->hiddenWindows.erase(
         std::remove_if(state->hiddenWindows.begin(), state->hiddenWindows.end(),
             [](const HIDDEN_WINDOW& item) {
@@ -92,31 +103,46 @@ void ReaddHiddenIcons(APP_STATE* state) {
         item.icon.uVersion = NOTIFYICON_VERSION_4;
         Shell_NotifyIcon(NIM_SETVERSION, &item.icon);
     }
+    UpdateListView(state);
 }
 
-// Restore a specific window based on the Tray Icon ID (which we set to the HWND)
-void RestoreWindow(APP_STATE* state, WPARAM callbackId) {
+// Helper to refresh the GUI list
+void UpdateListView(APP_STATE* state) {
+    if (!state->listView) return;
+    ListView_DeleteAllItems(state->listView);
+
+    LVITEM lvItem = { 0 };
+    lvItem.mask = LVIF_TEXT | LVIF_PARAM;
+
+    int index = 0;
+    for (const auto& item : state->hiddenWindows) {
+        lvItem.iItem = index;
+        lvItem.iSubItem = 0;
+        // Use the title we stored, or "Unknown"
+        lvItem.pszText = const_cast<LPWSTR>(item.title.empty() ? L"Unknown Window" : item.title.c_str());
+        // Store the Icon ID in lParam to find it later
+        lvItem.lParam = (LPARAM)item.iconId;
+        ListView_InsertItem(state->listView, &lvItem);
+        index++;
+    }
+}
+
+void RestoreWindow(APP_STATE* state, UINT iconId) {
     auto it = std::find_if(state->hiddenWindows.begin(), state->hiddenWindows.end(),
-        [&](const HIDDEN_WINDOW& item) {
-            return item.iconId == (UINT)callbackId;
-        });
+        [&](const HIDDEN_WINDOW& item) { return item.iconId == iconId; });
 
     if (it != state->hiddenWindows.end()) {
         if (it->window && IsWindow(it->window)) {
             ShowWindow(it->window, SW_RESTORE);
             SetForegroundWindow(it->window);
         }
-        // Remove icon from system tray
         Shell_NotifyIcon(NIM_DELETE, const_cast<PNOTIFYICONDATA>(&it->icon));
-
-        // Remove from our vector
         state->hiddenWindows.erase(it);
-
         SaveState(state);
+        UpdateListView(state);
     }
 }
 
-// Restore all currently hidden windows
 void RestoreAll(APP_STATE* state) {
     for (auto& item : state->hiddenWindows) {
         if (item.window && IsWindow(item.window)) {
@@ -125,18 +151,17 @@ void RestoreAll(APP_STATE* state) {
         Shell_NotifyIcon(NIM_DELETE, &item.icon);
     }
     state->hiddenWindows.clear();
-    SaveState(state); // This will trigger DeleteFile inside SaveState
+    SaveState(state);
+    UpdateListView(state);
 }
 
-// Logic to hide the window and add the icon
 void MinimizeToTray(APP_STATE* state, HWND targetWindow) {
     const wchar_t* restrictWins[] = { L"WorkerW", L"Shell_TrayWnd", L"Progman" };
-
     HWND currWin = targetWindow ? targetWindow : GetForegroundWindow();
 
     if (!currWin || !IsWindow(currWin)) return;
+    if (currWin == state->mainWindow) return; // Don't hide self
 
-    // Check against restricted system windows
     wchar_t className[256];
     if (GetClassName(currWin, className, 256)) {
         for (const auto& restricted : restrictWins) {
@@ -144,11 +169,10 @@ void MinimizeToTray(APP_STATE* state, HWND targetWindow) {
         }
     }
 
-    // Try to get the window icon
     HICON hIcon = (HICON)GetClassLongPtr(currWin, GCLP_HICONSM);
     if (!hIcon) {
         hIcon = (HICON)SendMessage(currWin, WM_GETICON, ICON_SMALL, 0);
-        if (!hIcon) hIcon = LoadIcon(NULL, IDI_APPLICATION); // Fallback
+        if (!hIcon) hIcon = LoadIcon(NULL, IDI_APPLICATION);
     }
 
     NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA) };
@@ -156,11 +180,12 @@ void MinimizeToTray(APP_STATE* state, HWND targetWindow) {
     nid.hIcon = hIcon;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_ICON;
-
     const UINT iconId = state->nextHiddenIconId++;
     nid.uID = iconId;
 
-    GetWindowText(currWin, nid.szTip, 128);
+    wchar_t titleBuf[128];
+    GetWindowText(currWin, titleBuf, 128);
+    wcscpy_s(nid.szTip, titleBuf);
 
     if (Shell_NotifyIcon(NIM_ADD, &nid)) {
         ShowWindow(currWin, SW_HIDE);
@@ -169,30 +194,24 @@ void MinimizeToTray(APP_STATE* state, HWND targetWindow) {
         newItem.icon = nid;
         newItem.window = currWin;
         newItem.iconId = iconId;
-        state->hiddenWindows.push_back(newItem);
+        newItem.title = std::wstring(titleBuf); // Store for listview
 
-        // Only save if this was a manual user action (not startup restoration)
-        if (!targetWindow) {
-            SaveState(state);
-        }
+        state->hiddenWindows.push_back(newItem);
+        if (!targetWindow) SaveState(state);
+        UpdateListView(state);
     }
 }
 
 void InitTrayIcon(HWND hWnd, HINSTANCE hInstance, NOTIFYICONDATA* icon) {
     icon->cbSize = sizeof(NOTIFYICONDATA);
     icon->hWnd = hWnd;
-    // Load default app icon or system 'Application' icon
     icon->hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101));
     if (!icon->hIcon) icon->hIcon = LoadIcon(NULL, IDI_APPLICATION);
-
     icon->uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP | NIF_MESSAGE;
     icon->uID = 1;
     icon->uCallbackMessage = WM_OURICON;
     wcscpy_s(icon->szTip, L"TrayCaddy");
-
     Shell_NotifyIcon(NIM_ADD, icon);
-
-    // Set version to 4 for the main app icon logic
     icon->uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIcon(NIM_SETVERSION, icon);
 }
@@ -205,15 +224,12 @@ void InitTrayMenu(HMENU* trayMenu) {
 
 void LoadState(APP_STATE* state) {
     if (!std::filesystem::exists(SAVE_FILE)) return;
-
     std::wifstream file(SAVE_FILE);
     int restoredCount = 0;
-
     std::wstring line;
     while (std::getline(file, line)) {
         if (line.empty()) continue;
         try {
-            // Convert stored string back to HWND
             uintptr_t val = std::stoull(line);
             HWND hwnd = (HWND)val;
             if (IsWindow(hwnd)) {
@@ -221,60 +237,102 @@ void LoadState(APP_STATE* state) {
                 restoredCount++;
             }
         }
-        catch (...) { /* Ignore malformed data */ }
+        catch (...) {}
     }
-
-    if (restoredCount > 0) {
-        std::wstring msg = L"Restored " + std::to_wstring(restoredCount) + L" windows from previous session.";
-        MessageBox(NULL, msg.c_str(), L"TrayCaddy", MB_OK | MB_ICONINFORMATION);
-    }
+    UpdateListView(state);
 }
 
-// --- Main Window Procedure ---
+// Create standard UI font (Segoe UI)
+HFONT GetModernFont() {
+    NONCLIENTMETRICS ncm = { sizeof(NONCLIENTMETRICS) };
+    SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICS), &ncm, 0);
+    return CreateFontIndirect(&ncm.lfMessageFont);
+}
+
+// --- Window Procedure ---
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     APP_STATE* state = (APP_STATE*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
     static UINT s_taskbarCreatedMsg = 0;
-    if (s_taskbarCreatedMsg == 0) {
-        s_taskbarCreatedMsg = RegisterWindowMessage(L"TaskbarCreated");
-    }
 
-    if (s_taskbarCreatedMsg != 0 && uMsg == s_taskbarCreatedMsg) {
-        if (state) {
-            InitTrayIcon(hwnd, GetModuleHandle(NULL), &state->mainIcon);
-        }
+    if (s_taskbarCreatedMsg == 0) s_taskbarCreatedMsg = RegisterWindowMessage(L"TaskbarCreated");
+    if (s_taskbarCreatedMsg != 0 && uMsg == s_taskbarCreatedMsg && state) {
+        InitTrayIcon(hwnd, GetModuleHandle(NULL), &state->mainIcon);
         ReaddHiddenIcons(state);
         return 0;
     }
 
     switch (uMsg) {
-    case WM_CREATE:
-        CreateWindow(L"BUTTON", L"Restore all", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            10, 10, 140, 28, hwnd, (HMENU)ID_BTN_RESTORE_ALL, GetModuleHandle(NULL), NULL);
-        CreateWindow(L"BUTTON", L"Exit", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            10, 48, 140, 28, hwnd, (HMENU)ID_BTN_EXIT, GetModuleHandle(NULL), NULL);
+    case WM_CREATE: {
+        // Initialize Common Controls
+        INITCOMMONCONTROLSEX icex;
+        icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
+        icex.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES;
+        InitCommonControlsEx(&icex);
+
+        // Define modern layout dimensions
+        int btnHeight = 30;
+        int padding = 10;
+        int listHeight = 180;
+        int winWidth = 300;
+
+        // Create List View
+        HWND hList = CreateWindow(WC_LISTVIEW, L"",
+            WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+            padding, padding, winWidth - (padding * 2), listHeight,
+            hwnd, (HMENU)ID_LIST_WINDOWS, GetModuleHandle(NULL), NULL);
+
+        // Add single column to list view
+        LVCOLUMN lvc;
+        lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT;
+        lvc.fmt = LVCFMT_LEFT;
+        lvc.cx = winWidth - (padding * 2) - 4; // Adjust for scrollbar
+        lvc.pszText = (LPWSTR)L"Window Title";
+        ListView_InsertColumn(hList, 0, &lvc);
+
+        // Apply extended styles (full row select)
+        ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+
+        // Buttons
+        HWND hBtnRestore = CreateWindow(L"BUTTON", L"Restore All",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT,
+            padding, listHeight + (padding * 2), 135, btnHeight,
+            hwnd, (HMENU)ID_BTN_RESTORE_ALL, GetModuleHandle(NULL), NULL);
+
+        HWND hBtnExit = CreateWindow(L"BUTTON", L"Exit App",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT,
+            winWidth - 135 - padding, listHeight + (padding * 2), 135, btnHeight,
+            hwnd, (HMENU)ID_BTN_EXIT, GetModuleHandle(NULL), NULL);
+
+        // Create state if not exists (handled in main usually, but just in case)
+        if (!state) {
+            // We need the state pointer to be set before controls if we want to store font immediately
+            // But WM_CREATE is called before SetWindowLongPtr returns in Main.
+        }
         return 0;
+    }
+
+    case WM_SETFONT: {
+        // Helper to apply font to all children
+        EnumChildWindows(hwnd, [](HWND child, LPARAM lparam) -> BOOL {
+            SendMessage(child, WM_SETFONT, (WPARAM)lparam, TRUE);
+            return TRUE;
+            }, (LPARAM)state->hFont);
+        return 0;
+    }
 
     case WM_ICON:
-        // Logic for the Minimized Windows
-        // wParam = ID (which is the HWND), lParam = Mouse Message
-        if (lParam == WM_LBUTTONDBLCLK) {
-            if (state) RestoreWindow(state, wParam);
-        }
+        if (lParam == WM_LBUTTONDBLCLK && state) RestoreWindow(state, (UINT)wParam);
         break;
 
     case WM_OURICON:
-        // Logic for the Main App Icon
         if (LOWORD(lParam) == WM_LBUTTONDBLCLK) {
             ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
         }
         else if (LOWORD(lParam) == WM_RBUTTONUP) {
-            POINT pt;
-            GetCursorPos(&pt);
-            SetForegroundWindow(hwnd); // Required for menu to close properly
-            if (state) {
-                TrackPopupMenu(state->trayMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
-            }
+            POINT pt; GetCursorPos(&pt);
+            SetForegroundWindow(hwnd);
+            if (state) TrackPopupMenu(state->trayMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
             PostMessage(hwnd, WM_NULL, 0, 0);
         }
         break;
@@ -290,8 +348,27 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         break;
     }
 
+                   // Handle List View Interactions
+    case WM_NOTIFY: {
+        LPNMHDR lpnmh = (LPNMHDR)lParam;
+        if (lpnmh->idFrom == ID_LIST_WINDOWS && state) {
+            if (lpnmh->code == NM_DBLCLK) {
+                // Restore window on double click
+                LPNMITEMACTIVATE lpnmitem = (LPNMITEMACTIVATE)lParam;
+                if (lpnmitem->iItem != -1) {
+                    LVITEM item = { 0 };
+                    item.iItem = lpnmitem->iItem;
+                    item.mask = LVIF_PARAM;
+                    ListView_GetItem(state->listView, &item);
+                    RestoreWindow(state, (UINT)item.lParam);
+                }
+            }
+        }
+        break;
+    }
+
     case WM_CLOSE:
-        ShowWindow(hwnd, SW_HIDE); // Minimize to tray instead of closing
+        ShowWindow(hwnd, SW_HIDE);
         return 0;
 
     case WM_DESTROY:
@@ -302,90 +379,82 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if (state) MinimizeToTray(state, NULL);
         break;
 
+        // Paint background White (Modern) instead of Gray
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+        return (LRESULT)GetStockObject(WHITE_BRUSH);
+
     default:
         return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
     return 0;
 }
 
-// --- Entry Point ---
-// FIX: Added SAL Annotations (_In_, _In_opt_) to match Windows spec
 int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nShowCmd) {
-    // Unused parameters to suppress warnings
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
     UNREFERENCED_PARAMETER(nShowCmd);
 
-    // Single Instance Check
     HANDLE hMutex = CreateMutex(NULL, TRUE, L"TrayCaddy_Unique_Mutex");
-
-    // Check for failure or duplicates
     if (hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
-        MessageBox(NULL, L"TrayCaddy is already running.", L"Error", MB_ICONERROR);
-        // FIX: Only close if it was actually created (not NULL)
         if (hMutex) CloseHandle(hMutex);
         return 1;
     }
 
-    // App State Initialization
     APP_STATE* appState = new APP_STATE();
+    appState->hFont = GetModernFont(); // Load Segoe UI
 
-    // Register Window Class
     const wchar_t CLASS_NAME[] = L"TrayCaddy";
     WNDCLASS wc = { 0 };
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = CLASS_NAME;
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH); // Modern White Background
     wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101));
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClass(&wc);
 
-    // Create Main Window
+    // Increased size for better layout
     appState->mainWindow = CreateWindow(CLASS_NAME, L"TrayCaddy",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 180, 130,
+        CW_USEDEFAULT, CW_USEDEFAULT, 316, 280,
         NULL, NULL, hInstance, NULL);
 
     if (!appState->mainWindow) {
-        // Cleanup if window creation failed
         if (hMutex) CloseHandle(hMutex);
         delete appState;
         return 1;
     }
 
-    // Store state pointer in Window User Data
     SetWindowLongPtr(appState->mainWindow, GWLP_USERDATA, (LONG_PTR)appState);
 
-    // Setup Main Icon
-    InitTrayIcon(appState->mainWindow, hInstance, &appState->mainIcon);
+    // Grab handle to list view
+    appState->listView = GetDlgItem(appState->mainWindow, ID_LIST_WINDOWS);
 
+    // Apply Fonts
+    SendMessage(appState->mainWindow, WM_SETFONT, 0, 0);
+
+    InitTrayIcon(appState->mainWindow, hInstance, &appState->mainIcon);
     InitTrayMenu(&appState->trayMenu);
 
     if (!RegisterHotKey(appState->mainWindow, 1, MOD_KEY | MOD_NOREPEAT, TRAY_KEY)) {
-        MessageBox(NULL, L"Could not register Hotkey (Win+Shift+Z)!", L"Error", MB_ICONEXCLAMATION);
+        MessageBox(NULL, L"Could not register Win+Shift+Z", L"Error", MB_ICONEXCLAMATION);
     }
 
     LoadState(appState);
     ShowWindow(appState->mainWindow, SW_SHOW);
 
-    // Message Loop
     MSG msg = { 0 };
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
 
-    // Cleanup
-    RestoreAll(appState); // Restores windows, deletes file
+    RestoreAll(appState);
     Shell_NotifyIcon(NIM_DELETE, &appState->mainIcon);
     UnregisterHotKey(appState->mainWindow, 1);
-
-    // FIX: trayMenu is initialized now, but good to check before destroy
     if (appState->trayMenu) DestroyMenu(appState->trayMenu);
-
-    // Release Mutex and Memory
-    // FIX: Check hMutex != NULL before closing
+    if (appState->hFont) DeleteObject(appState->hFont);
     if (hMutex) CloseHandle(hMutex);
     delete appState;
 
