@@ -5,7 +5,7 @@
 
 #define VK_Z_KEY 0x5A
 #define TRAY_KEY VK_Z_KEY
-#define MOD_KEY MOD_WIN + MOD_SHIFT
+#define MOD_KEY (MOD_WIN | MOD_SHIFT)
 
 #define WM_ICON 0x1C0A
 #define WM_OURICON 0x1C0B
@@ -63,16 +63,22 @@ void showWindow(TRCONTEXT* context, WPARAM callbackId) {
             SetForegroundWindow(context->icons[i].window);
             context->icons[i] = {};
 
-            std::vector<HIDDEN_WINDOW> temp = std::vector<HIDDEN_WINDOW>(context->iconIndex);
-            for (int j = 0, x = 0; j < context->iconIndex; j++)
+            std::vector<HIDDEN_WINDOW> temp(context->iconIndex);
+            int x = 0;
+            for (int j = 0; j < context->iconIndex; j++)
             {
                 if (context->icons[j].window) {
-                    temp[x] = context->icons[j];
-                    x++;
+                    temp[x++] = context->icons[j];
                 }
             }
-            memcpy_s(context->icons, sizeof(context->icons), &temp.front(), sizeof(HIDDEN_WINDOW) * context->iconIndex);
-            context->iconIndex--;
+
+            if (x > 0) {
+                memcpy_s(context->icons, sizeof(context->icons), temp.data(), sizeof(HIDDEN_WINDOW) * x);
+            }
+            for (int j = x; j < context->iconIndex; j++) {
+                context->icons[j] = {};
+            }
+            context->iconIndex = x;
             save(context);
             break;
         }
