@@ -34,13 +34,13 @@ const std::wstring SAVE_FILE = L"TrayCaddy.dat";
 
 // --- Data Structures ---
 struct HIDDEN_WINDOW {
-    NOTIFYICONDATA icon;
-    HWND window;
+    NOTIFYICONDATA icon = { 0 }; // Initialize to zero
+    HWND window = nullptr;       // Initialize to null
 };
 
 struct APP_STATE {
-    HWND mainWindow;
-    HMENU trayMenu;
+    HWND mainWindow = nullptr;   // FIX: Initialize member
+    HMENU trayMenu = nullptr;    // FIX: Initialize member
     std::vector<HIDDEN_WINDOW> hiddenWindows;
 };
 
@@ -282,11 +282,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 }
 
 // --- Entry Point ---
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
+// FIX: Added SAL Annotations (_In_, _In_opt_) to match Windows spec
+int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nShowCmd) {
+    // Unused parameters to suppress warnings
+    UNREFERENCED_PARAMETER(hPrevInstance);
+    UNREFERENCED_PARAMETER(lpCmdLine);
+    UNREFERENCED_PARAMETER(nShowCmd);
+
     // Single Instance Check
     HANDLE hMutex = CreateMutex(NULL, TRUE, L"TrayCaddy_Unique_Mutex");
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+
+    // Check for failure or duplicates
+    if (hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBox(NULL, L"TrayCaddy is already running.", L"Error", MB_ICONERROR);
+        // FIX: Only close if it was actually created (not NULL)
+        if (hMutex) CloseHandle(hMutex);
         return 1;
     }
 
@@ -310,7 +320,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
         CW_USEDEFAULT, CW_USEDEFAULT, 180, 130,
         NULL, NULL, hInstance, NULL);
 
-    if (!appState->mainWindow) return 1;
+    if (!appState->mainWindow) {
+        // Cleanup if window creation failed
+        if (hMutex) CloseHandle(hMutex);
+        delete appState;
+        return 1;
+    }
 
     // Store state pointer in Window User Data
     SetWindowLongPtr(appState->mainWindow, GWLP_USERDATA, (LONG_PTR)appState);
@@ -339,10 +354,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     RestoreAll(appState); // Restores windows, deletes file
     Shell_NotifyIcon(NIM_DELETE, &mainIcon);
     UnregisterHotKey(appState->mainWindow, 1);
-    DestroyMenu(appState->trayMenu);
+
+    // FIX: trayMenu is initialized now, but good to check before destroy
+    if (appState->trayMenu) DestroyMenu(appState->trayMenu);
 
     // Release Mutex and Memory
-    CloseHandle(hMutex);
+    // FIX: Check hMutex != NULL before closing
+    if (hMutex) CloseHandle(hMutex);
     delete appState;
 
     return (int)msg.wParam;
