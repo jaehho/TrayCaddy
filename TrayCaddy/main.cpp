@@ -1,439 +1,349 @@
+#ifndef UNICODE
+#define UNICODE
+#endif
+
 #include <Windows.h>
 #include <windowsx.h>
+#include <shellapi.h>
 #include <string>
 #include <vector>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+#include <filesystem>
 
+// Link necessary libraries automatically
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "shell32.lib")
+
+// --- Constants & Definitions ---
 #define VK_Z_KEY 0x5A
 #define TRAY_KEY VK_Z_KEY
 #define MOD_KEY (MOD_WIN | MOD_SHIFT)
 
-#define WM_ICON 0x1C0A
-#define WM_OURICON 0x1C0B
-#define EXIT_ID 0x99
-#define SHOW_ALL_ID 0x98
-#define MAXIMUM_WINDOWS 100
+#define WM_ICON     0x1C0A
+#define WM_OURICON  0x1C0B
 
-#define BTN_RESTORE_ALL_ID 0x200
-#define BTN_EXIT_ID 0x201
+#define ID_BTN_RESTORE_ALL  0x200
+#define ID_BTN_EXIT         0x201
+#define ID_MENU_RESTORE_ALL 0x98
+#define ID_MENU_EXIT        0x99
 
-// Stores hidden window record.
-typedef struct HIDDEN_WINDOW {
+// File name for persistence
+const std::wstring SAVE_FILE = L"TrayCaddy.dat";
+
+// --- Data Structures ---
+struct HIDDEN_WINDOW {
     NOTIFYICONDATA icon;
     HWND window;
-} HIDDEN_WINDOW;
+};
 
-// Current execution context
-typedef struct TRCONTEXT {
+struct APP_STATE {
     HWND mainWindow;
-    HIDDEN_WINDOW icons[MAXIMUM_WINDOWS];
     HMENU trayMenu;
-    int iconIndex;
-} TRCONTEXT;
+    std::vector<HIDDEN_WINDOW> hiddenWindows;
+};
 
-HANDLE saveFile;
+// --- Forward Declarations ---
+void SaveState(const APP_STATE* state);
+void RestoreWindow(APP_STATE* state, WPARAM callbackId);
+void RestoreAll(APP_STATE* state);
+void MinimizeToTray(APP_STATE* state, HWND targetWindow = NULL);
+void InitTrayIcon(HWND hWnd, HINSTANCE hInstance, NOTIFYICONDATA* icon);
+void InitTrayMenu(HMENU* trayMenu);
+void LoadState(APP_STATE* state);
 
-void save(const TRCONTEXT* context) {
-    DWORD numbytes;
-    if (saveFile == INVALID_HANDLE_VALUE) return;
+// --- Implementation ---
 
-    SetFilePointer(saveFile, 0, NULL, FILE_BEGIN);
-    SetEndOfFile(saveFile);
-
-    if (!context->iconIndex) {
+// Save logic: Only create file if windows are hidden. Delete if empty.
+void SaveState(const APP_STATE* state) {
+    if (state->hiddenWindows.empty()) {
+        DeleteFile(SAVE_FILE.c_str());
         return;
     }
 
-    for (int i = 0; i < context->iconIndex; i++)
-    {
-        if (context->icons[i].window) {
-            std::wstring str;
-            str = std::to_wstring((LONG_PTR)context->icons[i].window);
-            str += L",";
-            const wchar_t* handleString = str.c_str();
-            WriteFile(saveFile, handleString, (DWORD)(wcslen(handleString) * sizeof(wchar_t)), &numbytes, NULL);
+    std::wofstream file(SAVE_FILE, std::ios::trunc);
+    if (!file.is_open()) return;
+
+    for (const auto& item : state->hiddenWindows) {
+        if (item.window && IsWindow(item.window)) {
+            // Cast HWND to generic integer for storage
+            file << (uintptr_t)item.window << L",";
         }
     }
 }
 
-// FIXED: Changed parameter to WPARAM to receive full 32-bit HWND ID
-void showWindow(TRCONTEXT* context, WPARAM callbackId) {
-    for (int i = 0; i < context->iconIndex; i++)
-    {
-        // FIXED: Compare directly against the ID passed in wParam
-        if (context->icons[i].icon.uID == (UINT)callbackId) {
-            if (context->icons[i].window && IsWindow(context->icons[i].window)) {
-                ShowWindow(context->icons[i].window, SW_SHOW);
-                SetForegroundWindow(context->icons[i].window);
-            }
-            Shell_NotifyIcon(NIM_DELETE, &context->icons[i].icon);
-            context->icons[i] = {};
+// Restore a specific window based on the Tray Icon ID (which we set to the HWND)
+void RestoreWindow(APP_STATE* state, WPARAM callbackId) {
+    auto it = std::find_if(state->hiddenWindows.begin(), state->hiddenWindows.end(),
+        [&](const HIDDEN_WINDOW& item) {
+            return item.icon.uID == (UINT)callbackId;
+        });
 
-            std::vector<HIDDEN_WINDOW> temp(context->iconIndex);
-            int x = 0;
-            for (int j = 0; j < context->iconIndex; j++)
-            {
-                if (context->icons[j].window) {
-                    temp[x++] = context->icons[j];
-                }
-            }
-
-            if (x > 0) {
-                memcpy_s(context->icons, sizeof(context->icons), temp.data(), sizeof(HIDDEN_WINDOW) * x);
-            }
-            for (int j = x; j < context->iconIndex; j++) {
-                context->icons[j] = {};
-            }
-            context->iconIndex = x;
-            save(context);
-            break;
+    if (it != state->hiddenWindows.end()) {
+        if (it->window && IsWindow(it->window)) {
+            ShowWindow(it->window, SW_SHOW);
+            SetForegroundWindow(it->window);
         }
+        // Remove icon from system tray
+        Shell_NotifyIcon(NIM_DELETE, const_cast<PNOTIFYICONDATA>(&it->icon));
+
+        // Remove from our vector
+        state->hiddenWindows.erase(it);
+
+        SaveState(state);
     }
 }
 
-void minimizeToTray(TRCONTEXT* context, LONG_PTR restoreWindow) {
-    const wchar_t restrictWins[][14] = { {L"WorkerW"}, {L"Shell_TrayWnd"} };
-
-    HWND currWin = 0;
-    if (!restoreWindow) {
-        currWin = GetForegroundWindow();
+// Restore all currently hidden windows
+void RestoreAll(APP_STATE* state) {
+    for (auto& item : state->hiddenWindows) {
+        if (item.window && IsWindow(item.window)) {
+            ShowWindow(item.window, SW_SHOW);
+        }
+        Shell_NotifyIcon(NIM_DELETE, &item.icon);
     }
-    else {
-        currWin = (HWND)restoreWindow;
-    }
+    state->hiddenWindows.clear();
+    SaveState(state); // This will trigger DeleteFile inside SaveState
+}
 
-    if (!currWin) {
-        return;
-    }
+// Logic to hide the window and add the icon
+void MinimizeToTray(APP_STATE* state, HWND targetWindow) {
+    const wchar_t* restrictWins[] = { L"WorkerW", L"Shell_TrayWnd", L"Progman" };
 
-    if (!IsWindow(currWin)) {
-        return;
-    }
+    HWND currWin = targetWindow ? targetWindow : GetForegroundWindow();
 
+    if (!currWin || !IsWindow(currWin)) return;
+
+    // Check against restricted system windows
     wchar_t className[256];
-    if (!GetClassName(currWin, className, 256)) {
-        return;
-    }
-
-    for (int i = 0; i < sizeof(restrictWins) / sizeof(*restrictWins); i++)
-    {
-        if (wcscmp(restrictWins[i], className) == 0) {
-            return;
+    if (GetClassName(currWin, className, 256)) {
+        for (const auto& restricted : restrictWins) {
+            if (wcscmp(restricted, className) == 0) return;
         }
     }
 
-    if (context->iconIndex == MAXIMUM_WINDOWS) {
-        MessageBox(NULL, L"Error! Too many hidden windows. Please unhide some.", L"TrayCaddy", MB_OK | MB_ICONERROR);
-        return;
+    // Try to get the window icon
+    HICON hIcon = (HICON)GetClassLongPtr(currWin, GCLP_HICONSM);
+    if (!hIcon) {
+        hIcon = (HICON)SendMessage(currWin, WM_GETICON, ICON_SMALL, 0);
+        if (!hIcon) hIcon = LoadIcon(NULL, IDI_APPLICATION); // Fallback
     }
 
-    ULONG_PTR icon = GetClassLongPtr(currWin, GCLP_HICONSM);
-    if (!icon) {
-        icon = SendMessage(currWin, WM_GETICON, 2, NULL);
-        if (!icon) {
-            return;
-        }
-    }
-
-    NOTIFYICONDATA nid;
-    nid.cbSize = sizeof(NOTIFYICONDATA);
-    nid.hWnd = context->mainWindow;
-    nid.hIcon = (HICON)icon;
-
-    // FIXED: Removed NIF_SHOWTIP (Vista+) to ensure legacy compatibility
+    NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA) };
+    nid.hWnd = state->mainWindow;
+    nid.hIcon = hIcon;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-
-    // FIXED: Removed uVersion assignment. We want legacy behavior for these icons
-    // so that wParam returns the full 32-bit HWND.
-    // nid.uVersion = NOTIFYICON_VERSION_4; 
-
-    nid.uID = (UINT)(UINT_PTR)currWin;
     nid.uCallbackMessage = WM_ICON;
+
+    // IMPORTANT: We use the Window Handle (HWND) as the ID. 
+    nid.uID = (UINT)(UINT_PTR)currWin;
+
     GetWindowText(currWin, nid.szTip, 128);
 
-    if (!Shell_NotifyIcon(NIM_ADD, &nid)) {
-        return;
-    }
-    // FIXED: Do not set version for these icons
-    // Shell_NotifyIcon(NIM_SETVERSION, &nid);
+    if (Shell_NotifyIcon(NIM_ADD, &nid)) {
+        ShowWindow(currWin, SW_HIDE);
 
-    context->icons[context->iconIndex].icon = nid;
-    context->icons[context->iconIndex].window = currWin;
-    context->iconIndex++;
+        HIDDEN_WINDOW newItem;
+        newItem.icon = nid;
+        newItem.window = currWin;
+        state->hiddenWindows.push_back(newItem);
 
-    ShowWindow(currWin, SW_HIDE);
-
-    if (!restoreWindow) {
-        save(context);
+        // Only save if this was a manual user action (not startup restoration)
+        if (!targetWindow) {
+            SaveState(state);
+        }
     }
 }
 
-void createTrayIcon(HWND mainWindow, HINSTANCE hInstance, NOTIFYICONDATA* icon) {
+void InitTrayIcon(HWND hWnd, HINSTANCE hInstance, NOTIFYICONDATA* icon) {
     icon->cbSize = sizeof(NOTIFYICONDATA);
-    icon->hWnd = mainWindow;
+    icon->hWnd = hWnd;
+    // Load default app icon or system 'Application' icon
     icon->hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101));
+    if (!icon->hIcon) icon->hIcon = LoadIcon(NULL, IDI_APPLICATION);
+
     icon->uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP | NIF_MESSAGE;
-    icon->uVersion = NOTIFYICON_VERSION_4;
-    icon->uID = (UINT)(UINT_PTR)mainWindow;
+    icon->uID = (UINT)(UINT_PTR)hWnd;
     icon->uCallbackMessage = WM_OURICON;
     wcscpy_s(icon->szTip, L"TrayCaddy");
-    if (Shell_NotifyIcon(NIM_ADD, icon)) {
-        Shell_NotifyIcon(NIM_SETVERSION, icon);
-    }
+
+    Shell_NotifyIcon(NIM_ADD, icon);
+
+    // Set version to 4 for the main app icon logic
+    icon->uVersion = NOTIFYICON_VERSION_4;
+    Shell_NotifyIcon(NIM_SETVERSION, icon);
 }
 
-void createTrayMenu(HMENU* trayMenu) {
+void InitTrayMenu(HMENU* trayMenu) {
     *trayMenu = CreatePopupMenu();
-
-    MENUITEMINFO showAllMenuItem = { sizeof(MENUITEMINFO) };
-    MENUITEMINFO exitMenuItem = { sizeof(MENUITEMINFO) };
-
-    exitMenuItem.fMask = MIIM_STRING | MIIM_ID;
-    exitMenuItem.fType = MFT_STRING;
-    exitMenuItem.dwTypeData = (LPWSTR)L"Exit";
-    exitMenuItem.cch = 5;
-    exitMenuItem.wID = EXIT_ID;
-
-    showAllMenuItem.fMask = MIIM_STRING | MIIM_ID;
-    showAllMenuItem.fType = MFT_STRING;
-    showAllMenuItem.dwTypeData = (LPWSTR)L"Restore all windows";
-    showAllMenuItem.cch = 20;
-    showAllMenuItem.wID = SHOW_ALL_ID;
-
-    InsertMenuItem(*trayMenu, 0, FALSE, &showAllMenuItem);
-    InsertMenuItem(*trayMenu, 0, FALSE, &exitMenuItem);
+    InsertMenu(*trayMenu, 0, MF_BYPOSITION | MF_STRING, ID_MENU_RESTORE_ALL, L"Restore all windows");
+    InsertMenu(*trayMenu, 1, MF_BYPOSITION | MF_STRING, ID_MENU_EXIT, L"Exit");
 }
 
-void showAllWindows(TRCONTEXT* context) {
-    for (int i = 0; i < context->iconIndex; i++)
-    {
-        if (context->icons[i].window && IsWindow(context->icons[i].window)) {
-            ShowWindow(context->icons[i].window, SW_SHOW);
-        }
-        Shell_NotifyIcon(NIM_DELETE, &context->icons[i].icon);
-        context->icons[i] = {};
-    }
-    save(context);
-    context->iconIndex = 0;
-}
+void LoadState(APP_STATE* state) {
+    if (!std::filesystem::exists(SAVE_FILE)) return;
 
-void exitApp() {
-    PostQuitMessage(0);
-}
+    std::wifstream file(SAVE_FILE);
+    std::wstring content;
+    std::getline(file, content); // Read entire line
 
-void startup(TRCONTEXT* context) {
-    saveFile = CreateFile(L"TrayCaddy.dat", GENERIC_READ | GENERIC_WRITE, \
-        0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (content.empty()) return;
 
-    if (saveFile == INVALID_HANDLE_VALUE) {
-        MessageBox(NULL, L"Error! TrayCaddy could not create a save file.", L"TrayCaddy", MB_OK | MB_ICONERROR);
-        exitApp();
-        return;
-    }
+    std::wstringstream ss(content);
+    std::wstring segment;
+    int restoredCount = 0;
 
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        DWORD numbytes;
-        DWORD fileSize = GetFileSize(saveFile, NULL);
-
-        if (!fileSize) return;
-
-        FILETIME saveFileWriteTime;
-        GetFileTime(saveFile, NULL, NULL, &saveFileWriteTime);
-
-        DWORD charCount = fileSize / sizeof(wchar_t);
-        std::vector<wchar_t> contents(charCount);
-
-        if (ReadFile(saveFile, &contents.front(), fileSize, &numbytes, NULL)) {
-            std::wstring handle;
-            for (size_t i = 0; i < charCount; i++)
-            {
-                if (contents[i] != L',') {
-                    handle += contents[i];
-                }
-                else {
-                    if (!handle.empty()) {
-                        try {
-                            minimizeToTray(context, std::stoll(handle));
-                        }
-                        catch (...) {}
-                        handle.clear();
-                    }
+    while (std::getline(ss, segment, L',')) {
+        if (!segment.empty()) {
+            try {
+                // Convert stored string back to HWND
+                uintptr_t val = std::stoull(segment);
+                HWND hwnd = (HWND)val;
+                if (IsWindow(hwnd)) {
+                    MinimizeToTray(state, hwnd);
+                    restoredCount++;
                 }
             }
-
-            if (!handle.empty()) {
-                try {
-                    minimizeToTray(context, std::stoll(handle));
-                }
-                catch (...) {}
-                handle.clear();
-            }
-            if (context->iconIndex > 0) {
-                std::wstring restore_message = L"TrayCaddy had previously been terminated unexpectedly.\n\nRestored " + \
-                    std::to_wstring(context->iconIndex) + (context->iconIndex > 1 ? L" icons." : L" icon.");
-                MessageBox(NULL, restore_message.c_str(), L"TrayCaddy", MB_OK);
-            }
+            catch (...) { /* Ignore malformed data */ }
         }
     }
+
+    if (restoredCount > 0) {
+        std::wstring msg = L"Restored " + std::to_wstring(restoredCount) + L" windows from previous session.";
+        MessageBox(NULL, msg.c_str(), L"TrayCaddy", MB_OK | MB_ICONINFORMATION);
+    }
 }
 
+// --- Main Window Procedure ---
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    TRCONTEXT* context = (TRCONTEXT*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
-    POINT pt;
-    switch (uMsg)
-    {
-    case WM_CREATE:
-    {
-        CreateWindowEx(0, L"BUTTON", L"Restore all",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            10, 10, 140, 28,
-            hwnd, (HMENU)(INT_PTR)BTN_RESTORE_ALL_ID, GetModuleHandle(NULL), NULL);
+    APP_STATE* state = (APP_STATE*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
 
-        CreateWindowEx(0, L"BUTTON", L"Exit",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            10, 48, 140, 28,
-            hwnd, (HMENU)(INT_PTR)BTN_EXIT_ID, GetModuleHandle(NULL), NULL);
+    switch (uMsg) {
+    case WM_CREATE:
+        CreateWindow(L"BUTTON", L"Restore all", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            10, 10, 140, 28, hwnd, (HMENU)ID_BTN_RESTORE_ALL, GetModuleHandle(NULL), NULL);
+        CreateWindow(L"BUTTON", L"Exit", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            10, 48, 140, 28, hwnd, (HMENU)ID_BTN_EXIT, GetModuleHandle(NULL), NULL);
         return 0;
-    }
+
     case WM_ICON:
-        // FIXED: Legacy Mode Handling
-        // lParam holds the mouse message (e.g., WM_LBUTTONDBLCLK)
-        // wParam holds the ID (The HWND of the minimized window)
+        // Logic for the Minimized Windows
+        // wParam = ID (which is the HWND), lParam = Mouse Message
         if (lParam == WM_LBUTTONDBLCLK) {
-            if (context) showWindow(context, wParam);
+            if (state) RestoreWindow(state, wParam);
         }
         break;
+
     case WM_OURICON:
-        // Main App Icon uses Version 4 (as set in createTrayIcon)
-        // LOWORD(lParam) holds the mouse message
+        // Logic for the Main App Icon
         if (LOWORD(lParam) == WM_LBUTTONDBLCLK) {
             ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
-            return 0;
         }
-        if (LOWORD(lParam) == WM_RBUTTONUP) {
-            SetForegroundWindow(hwnd);
+        else if (LOWORD(lParam) == WM_RBUTTONUP) {
+            POINT pt;
             GetCursorPos(&pt);
-            if (context) {
-                TrackPopupMenuEx(context->trayMenu, \
-                    (GetSystemMetrics(SM_MENUDROPALIGNMENT) ? TPM_RIGHTALIGN : TPM_LEFTALIGN) | TPM_BOTTOMALIGN, \
-                    pt.x, pt.y, hwnd, NULL);
+            SetForegroundWindow(hwnd); // Required for menu to close properly
+            if (state) {
+                TrackPopupMenu(state->trayMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
             }
+            PostMessage(hwnd, WM_NULL, 0, 0);
         }
         break;
-    case WM_COMMAND:
-        if (HIWORD(wParam) == 0) {
-            switch (LOWORD(wParam)) {
-            case SHOW_ALL_ID:
-            case BTN_RESTORE_ALL_ID:
-                if (context) showAllWindows(context);
-                break;
-            case EXIT_ID:
-            case BTN_EXIT_ID:
-                exitApp();
-                break;
-            }
+
+    case WM_COMMAND: {
+        int id = LOWORD(wParam);
+        if (id == ID_BTN_RESTORE_ALL || id == ID_MENU_RESTORE_ALL) {
+            if (state) RestoreAll(state);
+        }
+        else if (id == ID_BTN_EXIT || id == ID_MENU_EXIT) {
+            PostQuitMessage(0);
         }
         break;
+    }
+
     case WM_CLOSE:
-        ShowWindow(hwnd, SW_HIDE);
+        ShowWindow(hwnd, SW_HIDE); // Minimize to tray instead of closing
         return 0;
+
     case WM_DESTROY:
-        exitApp();
+        PostQuitMessage(0);
         return 0;
+
     case WM_HOTKEY:
-        if (context) minimizeToTray(context, NULL);
+        if (state) MinimizeToTray(state, NULL);
         break;
+
     default:
         return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
     return 0;
 }
 
-#pragma warning( push )
-#pragma warning( disable : 4100 ) 
-int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nShowCmd) {
-#pragma warning( pop )
-
-    TRCONTEXT* context = new TRCONTEXT;
-    ZeroMemory(context, sizeof(TRCONTEXT));
-
-    saveFile = INVALID_HANDLE_VALUE;
-
-    NOTIFYICONDATA icon = {};
-
-    const wchar_t szUniqueNamedMutex[] = L"TrayCaddy_mutex";
-    HANDLE mutex = CreateMutex(NULL, TRUE, szUniqueNamedMutex);
-
-    if (mutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS)
-    {
-        MessageBox(NULL, L"Error! Another instance of TrayCaddy is already running.", L"TrayCaddy", MB_OK | MB_ICONERROR);
-        if (mutex) CloseHandle(mutex);
-        delete context;
+// --- Entry Point ---
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
+    // Single Instance Check
+    HANDLE hMutex = CreateMutex(NULL, TRUE, L"TrayCaddy_Unique_Mutex");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        MessageBox(NULL, L"TrayCaddy is already running.", L"Error", MB_ICONERROR);
         return 1;
     }
 
-    BOOL bRet;
-    MSG msg;
+    // App State Initialization
+    APP_STATE* appState = new APP_STATE();
 
+    // Register Window Class
     const wchar_t CLASS_NAME[] = L"TrayCaddy";
-
-    WNDCLASS wc = {};
+    WNDCLASS wc = { 0 };
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = CLASS_NAME;
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101));
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    RegisterClass(&wc);
 
-    if (!RegisterClass(&wc)) {
-        return 1;
-    }
-
-    context->mainWindow = CreateWindowEx(
-        0,
-        CLASS_NAME,
-        L"TrayCaddy",
+    // Create Main Window
+    appState->mainWindow = CreateWindow(CLASS_NAME, L"TrayCaddy",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT, 180, 130,
         NULL, NULL, hInstance, NULL);
 
-    if (!context->mainWindow) {
-        return 1;
+    if (!appState->mainWindow) return 1;
+
+    // Store state pointer in Window User Data
+    SetWindowLongPtr(appState->mainWindow, GWLP_USERDATA, (LONG_PTR)appState);
+
+    // Setup Main Icon
+    NOTIFYICONDATA mainIcon = { 0 };
+    InitTrayIcon(appState->mainWindow, hInstance, &mainIcon);
+
+    InitTrayMenu(&appState->trayMenu);
+
+    if (!RegisterHotKey(appState->mainWindow, 1, MOD_KEY | MOD_NOREPEAT, TRAY_KEY)) {
+        MessageBox(NULL, L"Could not register Hotkey (Win+Shift+Z)!", L"Error", MB_ICONEXCLAMATION);
     }
 
-    SetWindowLongPtr(context->mainWindow, GWLP_USERDATA, (LONG_PTR)context);
+    LoadState(appState);
+    ShowWindow(appState->mainWindow, SW_SHOW);
 
-    if (!RegisterHotKey(context->mainWindow, 0, MOD_KEY | MOD_NOREPEAT, TRAY_KEY)) {
-        MessageBox(NULL, L"Error! Could not register the hotkey.", L"TrayCaddy", MB_OK | MB_ICONERROR);
-        return 1;
+    // Message Loop
+    MSG msg = { 0 };
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
     }
-
-    createTrayIcon(context->mainWindow, hInstance, &icon);
-    createTrayMenu(&context->trayMenu);
-    startup(context);
-
-    ShowWindow(context->mainWindow, SW_SHOW);
-    UpdateWindow(context->mainWindow);
-
-    while ((bRet = GetMessage(&msg, 0, 0, 0)) != 0)
-    {
-        if (bRet != -1) {
-            DispatchMessage(&msg);
-        }
-    }
-
-    showAllWindows(context);
-    Shell_NotifyIcon(NIM_DELETE, &icon);
 
     // Cleanup
-    ReleaseMutex(mutex);
-    CloseHandle(mutex);
-    if (saveFile != INVALID_HANDLE_VALUE) CloseHandle(saveFile);
-    DestroyMenu(context->trayMenu);
-    DestroyWindow(context->mainWindow);
-    DeleteFile(L"TrayCaddy.dat");
-    UnregisterHotKey(context->mainWindow, 0);
+    RestoreAll(appState); // Restores windows, deletes file
+    Shell_NotifyIcon(NIM_DELETE, &mainIcon);
+    UnregisterHotKey(appState->mainWindow, 1);
+    DestroyMenu(appState->trayMenu);
 
-    delete context;
+    // Release Mutex and Memory
+    CloseHandle(hMutex);
+    delete appState;
+
     return (int)msg.wParam;
 }
