@@ -37,7 +37,6 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 // Control IDs
 #define ID_BTN_RESTORE_ALL    0x200
-#define ID_BTN_EXIT           0x201
 #define ID_LIST_WINDOWS       0x202
 #define ID_HK_CONTROL         0x203
 #define ID_LBL_CURRENT_HK     0x204
@@ -88,7 +87,6 @@ struct APP_STATE {
     // Main View Controls
     HWND listView = nullptr;
     HWND btnRestore = nullptr;
-    HWND btnExit = nullptr;
     HWND btnMenu = nullptr;
 
     // Settings View Controls
@@ -115,7 +113,6 @@ struct APP_STATE {
 
     // Hover States
     bool isHoverRestore = false;
-    bool isHoverExit = false;
     bool isHoverMenu = false;
     bool isHoverCloseSett = false;
 
@@ -401,7 +398,6 @@ void ToggleSettingsView(APP_STATE* state, bool showSettings) {
     // Toggle Main Controls
     ShowWindow(state->listView, mainShow);
     ShowWindow(state->btnRestore, mainShow);
-    ShowWindow(state->btnExit, mainShow);
     ShowWindow(state->btnMenu, mainShow);
 
     // Toggle Settings Controls
@@ -424,7 +420,6 @@ void DrawModernButton(LPDRAWITEMSTRUCT pDIS, const APP_STATE* state) {
 
     int id = pDIS->CtlID;
     if (id == ID_BTN_RESTORE_ALL) isHovered = state->isHoverRestore;
-    else if (id == ID_BTN_EXIT) isHovered = state->isHoverExit;
     else if (id == ID_BTN_MENU) isHovered = state->isHoverMenu;
     else if (id == ID_BTN_CLOSE_SETTINGS) isHovered = state->isHoverCloseSett;
 
@@ -553,15 +548,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         ListView_SetTextBkColor(state->listView, CLR_LIST_BG);
         ListView_SetTextColor(state->listView, CLR_TEXT_WHITE);
 
-        // Footer Buttons
+        // Footer Buttons - Only "Restore All" remains, centered in footer space
         int btnW = 120;
-        int footerY = clientH - footerBtnHeight - margin; // Anchored to bottom margin
+        int footerY = clientH - footerBtnHeight - margin;
+        int btnX = (clientW - btnW) / 2; // Center horizontally
 
         state->btnRestore = CreateWindow(L"BUTTON", L"Restore All", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
-            margin, footerY, btnW, footerBtnHeight, hwnd, (HMENU)ID_BTN_RESTORE_ALL, GetModuleHandle(NULL), NULL);
-
-        state->btnExit = CreateWindow(L"BUTTON", L"Exit", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
-            clientW - btnW - margin, footerY, btnW, footerBtnHeight, hwnd, (HMENU)ID_BTN_EXIT, GetModuleHandle(NULL), NULL);
+            btnX, footerY, btnW, footerBtnHeight, hwnd, (HMENU)ID_BTN_RESTORE_ALL, GetModuleHandle(NULL), NULL);
 
         // --- SETTINGS PAGE ---
 
@@ -601,7 +594,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             else if (id == ID_LBL_SETTINGS_TITLE) {
                 SendMessage(child, WM_SETFONT, (WPARAM)s->hFontHeader, TRUE);
             }
-            else if (id == ID_BTN_RESTORE_ALL || id == ID_BTN_EXIT) {
+            else if (id == ID_BTN_RESTORE_ALL) {
                 SendMessage(child, WM_SETFONT, (WPARAM)s->hFontBtn, TRUE);
             }
             else {
@@ -662,14 +655,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         }
         else {
             CheckHover(state->btnRestore, state->isHoverRestore);
-            CheckHover(state->btnExit, state->isHoverExit);
             CheckHover(state->btnMenu, state->isHoverMenu);
         }
         break;
     }
 
     case WM_MOUSELEAVE:
-        state->isHoverRestore = state->isHoverExit = state->isHoverMenu = state->isHoverCloseSett = false;
+        state->isHoverRestore = state->isHoverMenu = state->isHoverCloseSett = false;
         InvalidateRect(hwnd, NULL, FALSE);
         break;
 
@@ -702,13 +694,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
     case WM_COMMAND: {
         int id = LOWORD(wParam);
-        if (id == ID_BTN_EXIT || id == ID_MENU_EXIT) { PostQuitMessage(0); return 0; }
+
+        // Handle Exit from Menu
+        if (id == ID_MENU_EXIT) {
+            PostQuitMessage(0);
+            return 0;
+        }
+
         if (!state) break;
 
         // --- Navigation Logic ---
         if (id == ID_BTN_MENU) {
             HMENU hPop = CreatePopupMenu();
-            AppendMenu(hPop, MF_STRING, ID_MENU_OPEN_PREFS, L"Open Preferences");
+            AppendMenu(hPop, MF_STRING, ID_MENU_OPEN_PREFS, L"Preferences");
+            AppendMenu(hPop, MF_SEPARATOR, 0, NULL);
+            AppendMenu(hPop, MF_STRING, ID_MENU_EXIT, L"Exit");
 
             RECT rc; GetWindowRect(state->btnMenu, &rc);
             // Show below button
@@ -719,6 +719,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 std::wstring cur = L"Current: " + GetHotkeyString(state->hkModifiers, state->hkKey);
                 SetWindowText(state->lblCurrentHk, cur.c_str());
                 ToggleSettingsView(state, true);
+            }
+            else if (selection == ID_MENU_EXIT) {
+                PostQuitMessage(0);
             }
             DestroyMenu(hPop);
         }
@@ -772,17 +775,20 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     RegisterClass(&wc);
 
     // --- CALCULATE CORRECT WINDOW SIZE ---
-    // We want exactly 460x420 of usable client area.
-    RECT rc = { 0, 0, 460, 420 };
+    // We want exactly 360x280 of usable client area (shorter vertically).
+    RECT rc = { 0, 0, 360, 280 };
     AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
 
-    // Center on screen
-    int sW = GetSystemMetrics(SM_CXSCREEN);
-    int sH = GetSystemMetrics(SM_CYSCREEN);
-    int x = (sW - w) / 2;
-    int y = (sH - h) / 2;
+    // Use SPI_GETWORKAREA to get usable screen space (excluding taskbar)
+    RECT rcWork;
+    SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0);
+
+    // Bottom right positioning with padding
+    int padding = 20;
+    int x = rcWork.right - w - padding;
+    int y = rcWork.bottom - h - padding;
 
     appState->mainWindow = CreateWindow(L"TrayCaddy", L"TrayCaddy", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         x, y, w, h, NULL, NULL, hInstance, appState);
