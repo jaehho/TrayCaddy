@@ -13,6 +13,9 @@
 #define SHOW_ALL_ID 0x98
 #define MAXIMUM_WINDOWS 100
 
+#define BTN_RESTORE_ALL_ID 0x200
+#define BTN_EXIT_ID 0x201
+
 // Stores hidden window record.
 typedef struct HIDDEN_WINDOW {
     NOTIFYICONDATA icon;
@@ -278,6 +281,19 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     POINT pt;
     switch (uMsg)
     {
+    case WM_CREATE:
+    {
+        CreateWindowEx(0, L"BUTTON", L"Restore all",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            10, 10, 140, 28,
+            hwnd, (HMENU)(INT_PTR)BTN_RESTORE_ALL_ID, GetModuleHandle(NULL), NULL);
+
+        CreateWindowEx(0, L"BUTTON", L"Exit",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            10, 48, 140, 28,
+            hwnd, (HMENU)(INT_PTR)BTN_EXIT_ID, GetModuleHandle(NULL), NULL);
+        return 0;
+    }
     case WM_ICON:
         // FIXED: Legacy Mode Handling
         // lParam holds the mouse message (e.g., WM_LBUTTONDBLCLK)
@@ -289,6 +305,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     case WM_OURICON:
         // Main App Icon uses Version 4 (as set in createTrayIcon)
         // LOWORD(lParam) holds the mouse message
+        if (LOWORD(lParam) == WM_LBUTTONDBLCLK) {
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+            return 0;
+        }
         if (LOWORD(lParam) == WM_RBUTTONUP) {
             SetForegroundWindow(hwnd);
             GetCursorPos(&pt);
@@ -303,14 +324,22 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if (HIWORD(wParam) == 0) {
             switch (LOWORD(wParam)) {
             case SHOW_ALL_ID:
+            case BTN_RESTORE_ALL_ID:
                 if (context) showAllWindows(context);
                 break;
             case EXIT_ID:
+            case BTN_EXIT_ID:
                 exitApp();
                 break;
             }
         }
         break;
+    case WM_CLOSE:
+        ShowWindow(hwnd, SW_HIDE);
+        return 0;
+    case WM_DESTROY:
+        exitApp();
+        return 0;
     case WM_HOTKEY:
         if (context) minimizeToTray(context, NULL);
         break;
@@ -352,12 +381,21 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = CLASS_NAME;
+    wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101));
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
 
     if (!RegisterClass(&wc)) {
         return 1;
     }
 
-    context->mainWindow = CreateWindow(CLASS_NAME, NULL, NULL, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInstance, NULL);
+    context->mainWindow = CreateWindowEx(
+        0,
+        CLASS_NAME,
+        L"TrayCaddy",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        CW_USEDEFAULT, CW_USEDEFAULT, 180, 130,
+        NULL, NULL, hInstance, NULL);
 
     if (!context->mainWindow) {
         return 1;
@@ -373,6 +411,9 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     createTrayIcon(context->mainWindow, hInstance, &icon);
     createTrayMenu(&context->trayMenu);
     startup(context);
+
+    ShowWindow(context->mainWindow, SW_SHOW);
+    UpdateWindow(context->mainWindow);
 
     while ((bRet = GetMessage(&msg, 0, 0, 0)) != 0)
     {
