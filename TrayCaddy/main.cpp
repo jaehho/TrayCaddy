@@ -107,7 +107,7 @@ void minimizeToTray(TRCONTEXT* context, LONG_PTR restoreWindow) {
     }
 
     if (context->iconIndex == MAXIMUM_WINDOWS) {
-        MessageBox(NULL, L"Error! Too many hidden windows. Please unhide some.", L"Traymond", MB_OK | MB_ICONERROR);
+        MessageBox(NULL, L"Error! Too many hidden windows. Please unhide some.", L"TrayCaddy", MB_OK | MB_ICONERROR);
         return;
     }
 
@@ -158,7 +158,7 @@ void createTrayIcon(HWND mainWindow, HINSTANCE hInstance, NOTIFYICONDATA* icon) 
     icon->uVersion = NOTIFYICON_VERSION_4;
     icon->uID = (UINT)(UINT_PTR)mainWindow;
     icon->uCallbackMessage = WM_OURICON;
-    wcscpy_s(icon->szTip, L"Traymond");
+    wcscpy_s(icon->szTip, L"TrayCaddy");
     Shell_NotifyIcon(NIM_ADD, icon);
     Shell_NotifyIcon(NIM_SETVERSION, icon);
 }
@@ -201,11 +201,11 @@ void exitApp() {
 }
 
 void startup(TRCONTEXT* context) {
-    saveFile = CreateFile(L"traymond.dat", GENERIC_READ | GENERIC_WRITE, \
+    saveFile = CreateFile(L"TrayCaddy.dat", GENERIC_READ | GENERIC_WRITE, \
         0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 
     if (saveFile == INVALID_HANDLE_VALUE) {
-        MessageBox(NULL, L"Error! Traymond could not create a save file.", L"Traymond", MB_OK | MB_ICONERROR);
+        MessageBox(NULL, L"Error! TrayCaddy could not create a save file.", L"TrayCaddy", MB_OK | MB_ICONERROR);
         exitApp();
         return;
     }
@@ -242,9 +242,9 @@ void startup(TRCONTEXT* context) {
                 }
             }
             if (context->iconIndex > 0) {
-                std::wstring restore_message = L"Traymond had previously been terminated unexpectedly.\n\nRestored " + \
+                std::wstring restore_message = L"TrayCaddy had previously been terminated unexpectedly.\n\nRestored " + \
                     std::to_wstring(context->iconIndex) + (context->iconIndex > 1 ? L" icons." : L" icon.");
-                MessageBox(NULL, restore_message.c_str(), L"Traymond", MB_OK);
+                MessageBox(NULL, restore_message.c_str(), L"TrayCaddy", MB_OK);
             }
         }
     }
@@ -307,12 +307,12 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
 
     NOTIFYICONDATA icon = {};
 
-    const wchar_t szUniqueNamedMutex[] = L"traymond_mutex";
+    const wchar_t szUniqueNamedMutex[] = L"TrayCaddy_mutex";
     HANDLE mutex = CreateMutex(NULL, TRUE, szUniqueNamedMutex);
 
     if (mutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS)
     {
-        MessageBox(NULL, L"Error! Another instance of Traymond is already running.", L"Traymond", MB_OK | MB_ICONERROR);
+        MessageBox(NULL, L"Error! Another instance of TrayCaddy is already running.", L"TrayCaddy", MB_OK | MB_ICONERROR);
         if (mutex) CloseHandle(mutex);
         delete context;
         return 1;
@@ -321,7 +321,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     BOOL bRet;
     MSG msg;
 
-    const wchar_t CLASS_NAME[] = L"Traymond";
+    const wchar_t CLASS_NAME[] = L"TrayCaddy";
 
     WNDCLASS wc = {};
     wc.lpfnWndProc = WindowProc;
@@ -341,7 +341,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     SetWindowLongPtr(context->mainWindow, GWLP_USERDATA, (LONG_PTR)context);
 
     if (!RegisterHotKey(context->mainWindow, 0, MOD_KEY | MOD_NOREPEAT, TRAY_KEY)) {
-        MessageBox(NULL, L"Error! Could not register the hotkey.", L"Traymond", MB_OK | MB_ICONERROR);
+        MessageBox(NULL, L"Error! Could not register the hotkey.", L"TrayCaddy", MB_OK | MB_ICONERROR);
         return 1;
     }
 
@@ -365,7 +365,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     if (saveFile != INVALID_HANDLE_VALUE) CloseHandle(saveFile);
     DestroyMenu(context->trayMenu);
     DestroyWindow(context->mainWindow);
-    DeleteFile(L"traymond.dat");
+    DeleteFile(L"TrayCaddy.dat");
     UnregisterHotKey(context->mainWindow, 0);
 
     delete context;
