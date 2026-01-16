@@ -36,22 +36,33 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define WM_RESUME_HOTKEY (WM_USER + 3)
 
 // Control IDs
-#define ID_BTN_RESTORE_ALL  0x200
-#define ID_BTN_EXIT         0x201
-#define ID_LIST_WINDOWS     0x202
-#define ID_HK_CONTROL       0x203
-#define ID_LBL_CURRENT_HK   0x204
+#define ID_BTN_RESTORE_ALL    0x200
+#define ID_BTN_EXIT           0x201
+#define ID_LIST_WINDOWS       0x202
+#define ID_HK_CONTROL         0x203
+#define ID_LBL_CURRENT_HK     0x204
+#define ID_BTN_MENU           0x205 
+#define ID_BTN_CLOSE_SETTINGS 0x206 
+#define ID_LBL_INSTR          0x208
+#define ID_LBL_SETTINGS_TITLE 0x209 
 
-#define ID_MENU_RESTORE_ALL 0x98
-#define ID_MENU_EXIT        0x99
+#define ID_MENU_RESTORE_ALL   0x98
+#define ID_MENU_EXIT          0x99
+#define ID_MENU_OPEN_PREFS    0x100 
 
-// --- DARKER COLOR PALETTE ---
-const COLORREF CLR_BG_DARK = RGB(40, 50, 65);
-const COLORREF CLR_BTN_TEAL = RGB(0, 95, 105);
-const COLORREF CLR_BTN_PRESSED = RGB(0, 70, 80);
-const COLORREF CLR_TEXT_WHITE = RGB(255, 255, 255);
-const COLORREF CLR_LIST_BG = RGB(55, 65, 80);
-const COLORREF CLR_LIST_TEXT = RGB(235, 235, 235);
+// --- MODERN DARK PALETTE ---
+const COLORREF CLR_BG_DARK = RGB(30, 30, 30);
+const COLORREF CLR_LIST_BG = RGB(40, 40, 40);
+const COLORREF CLR_BORDER = RGB(60, 60, 60);
+
+// Vibrant Blue for buttons
+const COLORREF CLR_BTN_NORMAL = RGB(0, 110, 190);
+const COLORREF CLR_BTN_HOVER = RGB(0, 130, 220);
+const COLORREF CLR_BTN_PRESSED = RGB(0, 90, 160);
+
+const COLORREF CLR_TEXT_WHITE = RGB(245, 245, 245);
+const COLORREF CLR_TEXT_GRAY = RGB(160, 160, 160);
+const COLORREF CLR_ICON_HOVER = RGB(55, 55, 55);
 
 const std::wstring SAVE_FILE = L"TrayCaddy.dat";
 const std::wstring SETTINGS_FILE = L"TrayCaddy.ini";
@@ -63,6 +74,7 @@ struct HIDDEN_WINDOW {
     HWND window = nullptr;
     UINT iconId = 0;
     std::wstring title;
+    HICON hWindowIcon = nullptr;
 };
 
 struct CUSTOM_HOTKEY_DATA {
@@ -72,17 +84,40 @@ struct CUSTOM_HOTKEY_DATA {
 
 struct APP_STATE {
     HWND mainWindow = nullptr;
-    HWND listView = nullptr;
-    HWND hkControl = nullptr;
-    HMENU trayMenu = nullptr;
 
+    // Main View Controls
+    HWND listView = nullptr;
+    HWND btnRestore = nullptr;
+    HWND btnExit = nullptr;
+    HWND btnMenu = nullptr;
+
+    // Settings View Controls
+    HWND btnCloseSettings = nullptr;
+    HWND hkControl = nullptr;
+    HWND lblSettingsTitle = nullptr;
+    HWND lblCurrentHk = nullptr;
+    HWND lblInstruction = nullptr;
+
+    HMENU trayMenu = nullptr;
     std::vector<HIDDEN_WINDOW> hiddenWindows;
     UINT nextHiddenIconId = 1000;
     NOTIFYICONDATA mainIcon = { 0 };
 
     // GDI Objects
-    HFONT hFontUi = nullptr;
+    HFONT hFontUi = nullptr;      // Standard text
+    HFONT hFontBtn = nullptr;     // Button text (slightly bolder)
+    HFONT hFontHeader = nullptr;  // Large Icons/Headers
     HBRUSH hBrushBg = nullptr;
+    HIMAGELIST hImageList = nullptr;
+
+    // UI State
+    bool isSettingsOpen = false;
+
+    // Hover States
+    bool isHoverRestore = false;
+    bool isHoverExit = false;
+    bool isHoverMenu = false;
+    bool isHoverCloseSett = false;
 
     // Hotkey Settings
     UINT hkModifiers = MOD_WIN | MOD_SHIFT;
@@ -102,9 +137,11 @@ void InitTrayMenu(HMENU* trayMenu);
 void LoadState(APP_STATE* state);
 void ReaddHiddenIcons(APP_STATE* state);
 void UpdateListView(APP_STATE* state);
-HFONT CreateModernFont(int pointSize, bool bold);
+HFONT CreateModernFont(int pointSize, int weight);
+void InvalidateButton(HWND hBtn);
+void ToggleSettingsView(APP_STATE* state, bool showSettings);
 
-// --- Custom Hotkey Control ---
+// --- Hotkey Control Logic ---
 
 std::wstring GetHotkeyString(UINT modifiers, UINT key) {
     std::wstring text = L"";
@@ -131,66 +168,27 @@ std::wstring GetHotkeyString(UINT modifiers, UINT key) {
 
 LRESULT CALLBACK CustomHotkeySubclass(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     switch (uMsg) {
-
-        // --- FOCUS HANDLING TO PREVENT KEY MASKING ---
-        // When focused, tell parent to UNREGISTER the global hotkey so we can type it.
-    case WM_SETFOCUS:
-        PostMessage(GetParent(hWnd), WM_PAUSE_HOTKEY, 0, 0);
-        break;
-
-        // When focus lost, tell parent to RE-REGISTER the hotkey so it works again.
-    case WM_KILLFOCUS:
-        PostMessage(GetParent(hWnd), WM_RESUME_HOTKEY, 0, 0);
-        break;
-
-    case WM_KEYDOWN:
-    case WM_SYSKEYDOWN: {
+    case WM_SETFOCUS: PostMessage(GetParent(hWnd), WM_PAUSE_HOTKEY, 0, 0); break;
+    case WM_KILLFOCUS: PostMessage(GetParent(hWnd), WM_RESUME_HOTKEY, 0, 0); break;
+    case WM_KEYDOWN: case WM_SYSKEYDOWN: {
         UINT modifiers = 0;
         if (GetKeyState(VK_LWIN) & 0x8000 || GetKeyState(VK_RWIN) & 0x8000) modifiers |= MOD_WIN;
         if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= MOD_CONTROL;
         if (GetKeyState(VK_SHIFT) & 0x8000)   modifiers |= MOD_SHIFT;
         if (GetKeyState(VK_MENU) & 0x8000)    modifiers |= MOD_ALT;
-
-        UINT key = 0;
-        if (wParam != VK_CONTROL && wParam != VK_SHIFT && wParam != VK_MENU && wParam != VK_LWIN && wParam != VK_RWIN) {
-            key = (UINT)wParam;
-        }
-
-        std::wstring text = GetHotkeyString(modifiers, key);
-        SetWindowText(hWnd, text.c_str());
-
+        UINT key = (wParam != VK_CONTROL && wParam != VK_SHIFT && wParam != VK_MENU && wParam != VK_LWIN && wParam != VK_RWIN) ? (UINT)wParam : 0;
+        SetWindowText(hWnd, GetHotkeyString(modifiers, key).c_str());
         CUSTOM_HOTKEY_DATA* data = (CUSTOM_HOTKEY_DATA*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
-        if (data) {
-            data->modifiers = modifiers;
-            data->vKey = key;
-        }
+        if (data) { data->modifiers = modifiers; data->vKey = key; }
         return 0;
     }
-
-                      // Handle Key Release to Trigger Update
-    case WM_KEYUP:
-    case WM_SYSKEYUP: {
+    case WM_KEYUP: case WM_SYSKEYUP: {
         CUSTOM_HOTKEY_DATA* data = (CUSTOM_HOTKEY_DATA*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
-        // If we have a valid key recorded, tell the parent to update settings
-        if (data && data->vKey != 0) {
-            SendMessage(GetParent(hWnd), WM_UPDATE_HOTKEY, 0, 0);
-        }
+        if (data && data->vKey != 0) SendMessage(GetParent(hWnd), WM_UPDATE_HOTKEY, 0, 0);
         return 0;
     }
-
-    case WM_CHAR: case WM_SYSCHAR:
-        return 0;
-
-    case WM_ERASEBKGND: {
-        HDC hdc = (HDC)wParam;
-        RECT rc; GetClientRect(hWnd, &rc);
-        HBRUSH hBr = CreateSolidBrush(CLR_LIST_BG);
-        FillRect(hdc, &rc, hBr);
-        DeleteObject(hBr);
-        return 1;
-    }
-    case WM_CTLCOLORSTATIC:
-    case WM_CTLCOLOREDIT: {
+    case WM_CHAR: case WM_SYSCHAR: return 0;
+    case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: {
         HDC hdc = (HDC)wParam;
         SetTextColor(hdc, CLR_TEXT_WHITE);
         SetBkColor(hdc, CLR_LIST_BG);
@@ -218,16 +216,11 @@ void MakeCustomHotkeyControl(HWND hEdit, UINT defaultMod, UINT defaultKey) {
 // --- Logic Implementation ---
 
 void SaveState(const APP_STATE* state) {
-    if (state->hiddenWindows.empty()) {
-        DeleteFile(SAVE_FILE.c_str());
-        return;
-    }
+    if (state->hiddenWindows.empty()) { DeleteFile(SAVE_FILE.c_str()); return; }
     std::wofstream file(SAVE_FILE, std::ios::trunc);
     if (!file.is_open()) return;
     for (const auto& item : state->hiddenWindows) {
-        if (item.window && IsWindow(item.window)) {
-            file << (uintptr_t)item.window << L"\n";
-        }
+        if (item.window && IsWindow(item.window)) file << (uintptr_t)item.window << L"\n";
     }
 }
 
@@ -243,19 +236,13 @@ void LoadSettings(APP_STATE* state) {
 
 void UpdateAppHotkey(APP_STATE* state) {
     UnregisterHotKey(state->mainWindow, HOTKEY_ID);
-    if (!RegisterHotKey(state->mainWindow, HOTKEY_ID, state->hkModifiers | MOD_NOREPEAT, state->hkKey)) {
-        // Silent fail or debug string
-        OutputDebugString(L"TrayCaddy: Failed to register hotkey.\n");
-    }
+    RegisterHotKey(state->mainWindow, HOTKEY_ID, state->hkModifiers | MOD_NOREPEAT, state->hkKey);
 }
 
 void ReaddHiddenIcons(APP_STATE* state) {
     if (!state) return;
-    state->hiddenWindows.erase(
-        std::remove_if(state->hiddenWindows.begin(), state->hiddenWindows.end(),
-            [](const HIDDEN_WINDOW& item) { return !item.window || !IsWindow(item.window); }),
-        state->hiddenWindows.end());
-
+    state->hiddenWindows.erase(std::remove_if(state->hiddenWindows.begin(), state->hiddenWindows.end(),
+        [](const HIDDEN_WINDOW& item) { return !item.window || !IsWindow(item.window); }), state->hiddenWindows.end());
     for (auto& item : state->hiddenWindows) {
         Shell_NotifyIcon(NIM_ADD, &item.icon);
         item.icon.uVersion = NOTIFYICON_VERSION_4;
@@ -267,29 +254,37 @@ void ReaddHiddenIcons(APP_STATE* state) {
 void UpdateListView(APP_STATE* state) {
     if (!state->listView) return;
     ListView_DeleteAllItems(state->listView);
-    LVITEM lvItem = { 0 };
-    lvItem.mask = LVIF_TEXT | LVIF_PARAM;
+    ImageList_RemoveAll(state->hImageList);
+
     int index = 0;
-    for (const auto& item : state->hiddenWindows) {
+    for (auto& item : state->hiddenWindows) {
+        int imgIdx = -1;
+        if (item.hWindowIcon) imgIdx = ImageList_AddIcon(state->hImageList, item.hWindowIcon);
+        else imgIdx = ImageList_AddIcon(state->hImageList, LoadIcon(NULL, IDI_APPLICATION));
+
+        LVITEM lvItem = { 0 };
+        lvItem.mask = LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE;
         lvItem.iItem = index;
         lvItem.iSubItem = 0;
         lvItem.pszText = const_cast<LPWSTR>(item.title.empty() ? L"Unknown Window" : item.title.c_str());
         lvItem.lParam = (LPARAM)item.iconId;
+        lvItem.iImage = imgIdx;
         ListView_InsertItem(state->listView, &lvItem);
         index++;
     }
+    InvalidateRect(state->listView, NULL, TRUE);
 }
 
 void RestoreWindow(APP_STATE* state, UINT iconId) {
     auto it = std::find_if(state->hiddenWindows.begin(), state->hiddenWindows.end(),
         [&](const HIDDEN_WINDOW& item) { return item.iconId == iconId; });
-
     if (it != state->hiddenWindows.end()) {
         if (it->window && IsWindow(it->window)) {
             ShowWindow(it->window, SW_RESTORE);
             SetForegroundWindow(it->window);
         }
         Shell_NotifyIcon(NIM_DELETE, const_cast<PNOTIFYICONDATA>(&it->icon));
+        if (it->hWindowIcon) DestroyIcon(it->hWindowIcon);
         state->hiddenWindows.erase(it);
         SaveState(state);
         UpdateListView(state);
@@ -300,6 +295,7 @@ void RestoreAll(APP_STATE* state) {
     for (auto& item : state->hiddenWindows) {
         if (item.window && IsWindow(item.window)) ShowWindow(item.window, SW_RESTORE);
         Shell_NotifyIcon(NIM_DELETE, &item.icon);
+        if (item.hWindowIcon) DestroyIcon(item.hWindowIcon);
     }
     state->hiddenWindows.clear();
     SaveState(state);
@@ -309,29 +305,24 @@ void RestoreAll(APP_STATE* state) {
 void MinimizeToTray(APP_STATE* state, HWND targetWindow) {
     const wchar_t* restrictWins[] = { L"WorkerW", L"Shell_TrayWnd", L"Progman" };
     HWND currWin = targetWindow ? targetWindow : GetForegroundWindow();
-
-    if (!currWin || !IsWindow(currWin)) return;
-    if (currWin == state->mainWindow) return;
+    if (!currWin || !IsWindow(currWin) || currWin == state->mainWindow) return;
 
     wchar_t className[256];
     if (GetClassName(currWin, className, 256)) {
-        for (const auto& restricted : restrictWins) {
-            if (wcscmp(restricted, className) == 0) return;
-        }
+        for (const auto& restricted : restrictWins) if (wcscmp(restricted, className) == 0) return;
     }
 
-    HICON hIcon = (HICON)GetClassLongPtr(currWin, GCLP_HICONSM);
-    if (!hIcon) hIcon = (HICON)SendMessage(currWin, WM_GETICON, ICON_SMALL, 0);
+    HICON hIcon = (HICON)SendMessage(currWin, WM_GETICON, ICON_SMALL, 0);
+    if (!hIcon) hIcon = (HICON)GetClassLongPtr(currWin, GCLP_HICONSM);
     if (!hIcon) hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    HICON hStorageIcon = CopyIcon(hIcon);
 
     NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA) };
     nid.hWnd = state->mainWindow;
     nid.hIcon = hIcon;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_ICON;
-    const UINT iconId = state->nextHiddenIconId++;
-    nid.uID = iconId;
-
+    nid.uID = state->nextHiddenIconId++;
     wchar_t titleBuf[128];
     GetWindowText(currWin, titleBuf, 128);
     wcscpy_s(nid.szTip, titleBuf);
@@ -341,8 +332,9 @@ void MinimizeToTray(APP_STATE* state, HWND targetWindow) {
         HIDDEN_WINDOW newItem;
         newItem.icon = nid;
         newItem.window = currWin;
-        newItem.iconId = iconId;
+        newItem.iconId = nid.uID;
         newItem.title = std::wstring(titleBuf);
+        newItem.hWindowIcon = hStorageIcon;
         state->hiddenWindows.push_back(newItem);
         if (!targetWindow) SaveState(state);
         UpdateListView(state);
@@ -366,7 +358,8 @@ void InitTrayIcon(HWND hWnd, HINSTANCE hInstance, NOTIFYICONDATA* icon) {
 void InitTrayMenu(HMENU* trayMenu) {
     *trayMenu = CreatePopupMenu();
     InsertMenu(*trayMenu, 0, MF_BYPOSITION | MF_STRING, ID_MENU_RESTORE_ALL, L"Restore all windows");
-    InsertMenu(*trayMenu, 1, MF_BYPOSITION | MF_STRING, ID_MENU_EXIT, L"Exit");
+    InsertMenu(*trayMenu, 1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
+    InsertMenu(*trayMenu, 2, MF_BYPOSITION | MF_STRING, ID_MENU_EXIT, L"Exit");
 }
 
 void LoadState(APP_STATE* state) {
@@ -385,53 +378,116 @@ void LoadState(APP_STATE* state) {
     UpdateListView(state);
 }
 
-// --- Visual & Helper Functions ---
+// --- UI Logic & Rendering ---
 
-HFONT CreateModernFont(int pointSize, bool bold) {
+HFONT CreateModernFont(int pointSize, int weight) {
     HDC hdc = GetDC(NULL);
     LONG height = -MulDiv(pointSize, GetDeviceCaps(hdc, LOGPIXELSY), 72);
     ReleaseDC(NULL, hdc);
-
-    return CreateFont(height, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+    return CreateFont(height, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+}
+
+void InvalidateButton(HWND hBtn) {
+    InvalidateRect(hBtn, NULL, FALSE);
+}
+
+void ToggleSettingsView(APP_STATE* state, bool showSettings) {
+    state->isSettingsOpen = showSettings;
+    int mainShow = showSettings ? SW_HIDE : SW_SHOW;
+    int settShow = showSettings ? SW_SHOW : SW_HIDE;
+
+    // Toggle Main Controls
+    ShowWindow(state->listView, mainShow);
+    ShowWindow(state->btnRestore, mainShow);
+    ShowWindow(state->btnExit, mainShow);
+    ShowWindow(state->btnMenu, mainShow);
+
+    // Toggle Settings Controls
+    ShowWindow(state->hkControl, settShow);
+    ShowWindow(state->btnCloseSettings, settShow);
+    ShowWindow(state->lblSettingsTitle, settShow);
+    ShowWindow(state->lblCurrentHk, settShow);
+    ShowWindow(state->lblInstruction, settShow);
+
+    // Ensure focus is safe
+    if (showSettings) SetFocus(state->hkControl);
+    else SetFocus(state->listView);
 }
 
 void DrawModernButton(LPDRAWITEMSTRUCT pDIS, const APP_STATE* state) {
     HDC hdc = pDIS->hDC;
     RECT rc = pDIS->rcItem;
     bool isPressed = (pDIS->itemState & ODS_SELECTED);
+    bool isHovered = false;
 
-    FillRect(hdc, &rc, state->hBrushBg);
+    int id = pDIS->CtlID;
+    if (id == ID_BTN_RESTORE_ALL) isHovered = state->isHoverRestore;
+    else if (id == ID_BTN_EXIT) isHovered = state->isHoverExit;
+    else if (id == ID_BTN_MENU) isHovered = state->isHoverMenu;
+    else if (id == ID_BTN_CLOSE_SETTINGS) isHovered = state->isHoverCloseSett;
+
+    FillRect(hdc, &rc, state->hBrushBg); // Clear background
+
+    // Style 1: Flat Icon Button (Menu / Close) - No background unless hovered
+    if (id == ID_BTN_MENU || id == ID_BTN_CLOSE_SETTINGS) {
+        if (isHovered || isPressed) {
+            // Circle or Rounded Square background for icons
+            HBRUSH hHover = CreateSolidBrush(CLR_ICON_HOVER);
+            HPEN hPenNull = CreatePen(PS_NULL, 0, 0);
+            SelectObject(hdc, hHover);
+            SelectObject(hdc, hPenNull);
+            RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
+            DeleteObject(hHover);
+            DeleteObject(hPenNull);
+        }
+        SetTextColor(hdc, CLR_TEXT_WHITE);
+        SelectObject(hdc, state->hFontHeader); // Use larger font for icons
+    }
+    // Style 2: Standard Rounded CTA Button
+    else {
+        COLORREF btnColor = isPressed ? CLR_BTN_PRESSED : (isHovered ? CLR_BTN_HOVER : CLR_BTN_NORMAL);
+        HBRUSH hBr = CreateSolidBrush(btnColor);
+        HPEN hPen = CreatePen(PS_NULL, 0, 0);
+
+        SelectObject(hdc, hBr);
+        SelectObject(hdc, hPen);
+
+        // Draw Rounded Rectangle
+        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 6, 6);
+
+        DeleteObject(hBr);
+        DeleteObject(hPen);
+
+        SetTextColor(hdc, CLR_TEXT_WHITE);
+        SelectObject(hdc, state->hFontBtn);
+        if (isPressed) OffsetRect(&rc, 1, 1);
+    }
 
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, CLR_TEXT_WHITE);
-
-    COLORREF btnColor = isPressed ? CLR_BTN_PRESSED : CLR_BTN_TEAL;
-    HBRUSH hBr = CreateSolidBrush(btnColor);
-    HPEN hPen = CreatePen(PS_SOLID, 1, btnColor);
-
-    HGDIOBJ oldBr = SelectObject(hdc, hBr);
-    HGDIOBJ oldPen = SelectObject(hdc, hPen);
-
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
-
     wchar_t buf[256];
     GetWindowText(pDIS->hwndItem, buf, 256);
-
-    if (isPressed) OffsetRect(&rc, 1, 1);
     DrawText(hdc, buf, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
 
-    SelectObject(hdc, oldBr);
-    SelectObject(hdc, oldPen);
-    DeleteObject(hBr);
-    DeleteObject(hPen);
+LRESULT HandleListCustomDraw(APP_STATE* state, LPARAM lParam) {
+    if (state->hiddenWindows.empty()) {
+        HDC hdc = GetDC(state->listView);
+        RECT rc; GetClientRect(state->listView, &rc);
+        SetBkColor(hdc, CLR_LIST_BG);
+        SetTextColor(hdc, CLR_TEXT_GRAY);
+        SelectObject(hdc, state->hFontUi);
+        const wchar_t* msg = L"No hidden windows.\nUse the hotkey to hide active window.";
+        DrawText(hdc, msg, -1, &rc, DT_CENTER | DT_VCENTER);
+        ReleaseDC(state->listView, hdc);
+    }
+    return 0;
 }
 
 // --- Window Procedure ---
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     APP_STATE* state = (APP_STATE*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
-
     if (uMsg == WM_NCCREATE) {
         CREATESTRUCT* pCreate = (CREATESTRUCT*)lParam;
         state = (APP_STATE*)pCreate->lpCreateParams;
@@ -440,88 +496,93 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
     static UINT s_taskbarCreatedMsg = 0;
     if (s_taskbarCreatedMsg == 0) s_taskbarCreatedMsg = RegisterWindowMessage(L"TaskbarCreated");
-
-    if (s_taskbarCreatedMsg != 0 && uMsg == s_taskbarCreatedMsg) {
-        if (state) {
-            InitTrayIcon(hwnd, GetModuleHandle(NULL), &state->mainIcon);
-            ReaddHiddenIcons(state);
-        }
+    if (s_taskbarCreatedMsg != 0 && uMsg == s_taskbarCreatedMsg && state) {
+        InitTrayIcon(hwnd, GetModuleHandle(NULL), &state->mainIcon);
+        ReaddHiddenIcons(state);
         return 0;
     }
 
     switch (uMsg) {
     case WM_CREATE: {
-        INITCOMMONCONTROLSEX icex;
-        icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
-        icex.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES;
+        INITCOMMONCONTROLSEX icex = { sizeof(INITCOMMONCONTROLSEX), ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES };
         InitCommonControlsEx(&icex);
 
-        const int margin = 20;
-        const int winWidth = 450;
-        const int winHeight = 400;
+        // We use GetClientRect for layout to ensure robustness
+        RECT rcClient;
+        GetClientRect(hwnd, &rcClient);
+        int clientW = rcClient.right;
+        int clientH = rcClient.bottom;
 
-        SetWindowPos(hwnd, NULL, 0, 0, winWidth, winHeight, SWP_NOMOVE | SWP_NOZORDER);
+        const int margin = 24; // Nice padding
 
-        // 1. LIST VIEW 
-        int listHeight = 220;
-        HWND hList = CreateWindow(WC_LISTVIEW, L"",
-            WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-            margin, margin, winWidth - (margin * 2 + 15), listHeight,
+        // Fonts
+        state->hFontUi = CreateModernFont(10, FW_NORMAL);
+        state->hFontBtn = CreateModernFont(10, FW_SEMIBOLD);
+        state->hFontHeader = CreateModernFont(16, FW_NORMAL);
+
+        // --- MAIN PAGE ---
+
+        // Menu Button (Top Left)
+        state->btnMenu = CreateWindow(L"BUTTON", L"\u22EE", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
+            margin, 16, 32, 32, hwnd, (HMENU)ID_BTN_MENU, GetModuleHandle(NULL), NULL);
+
+        // List View
+        int listTop = 64;
+        int footerBtnHeight = 35;
+        // Calculate height based on actual client height to avoid cutoff
+        int listH = clientH - margin - footerBtnHeight - 20 - listTop;
+
+        state->listView = CreateWindow(WC_LISTVIEW, L"",
+            WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS,
+            margin, listTop, clientW - (margin * 2), listH,
             hwnd, (HMENU)ID_LIST_WINDOWS, GetModuleHandle(NULL), NULL);
 
-        LVCOLUMN lvc;
+        int iconSize = GetSystemMetrics(SM_CXSMICON);
+        state->hImageList = ImageList_Create(iconSize, iconSize, ILC_COLOR32 | ILC_MASK, 1, 1);
+        ListView_SetImageList(state->listView, state->hImageList, LVSIL_SMALL);
+
+        LVCOLUMN lvc = { 0 };
         lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT;
         lvc.fmt = LVCFMT_LEFT;
-        lvc.cx = winWidth - (margin * 2) - 40;
+        lvc.cx = clientW - (margin * 2) - 20;
         lvc.pszText = (LPWSTR)L"Window Title";
-        ListView_InsertColumn(hList, 0, &lvc);
+        ListView_InsertColumn(state->listView, 0, &lvc);
 
-        ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-        ListView_SetBkColor(hList, CLR_LIST_BG);
-        ListView_SetTextBkColor(hList, CLR_LIST_BG);
-        ListView_SetTextColor(hList, CLR_LIST_TEXT);
+        ListView_SetExtendedListViewStyle(state->listView, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        ListView_SetBkColor(state->listView, CLR_LIST_BG);
+        ListView_SetTextBkColor(state->listView, CLR_LIST_BG);
+        ListView_SetTextColor(state->listView, CLR_TEXT_WHITE);
 
-        int currentY = margin + listHeight + 15;
+        // Footer Buttons
+        int btnW = 120;
+        int footerY = clientH - footerBtnHeight - margin; // Anchored to bottom margin
 
-        // 2. SETTINGS SECTION
-        int rowHeight = 28;
+        state->btnRestore = CreateWindow(L"BUTTON", L"Restore All", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
+            margin, footerY, btnW, footerBtnHeight, hwnd, (HMENU)ID_BTN_RESTORE_ALL, GetModuleHandle(NULL), NULL);
 
-        std::wstring currentText = L"Current Hotkey: ";
-        if (state) currentText += GetHotkeyString(state->hkModifiers, state->hkKey);
+        state->btnExit = CreateWindow(L"BUTTON", L"Exit", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
+            clientW - btnW - margin, footerY, btnW, footerBtnHeight, hwnd, (HMENU)ID_BTN_EXIT, GetModuleHandle(NULL), NULL);
 
-        CreateWindow(L"STATIC", currentText.c_str(),
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            margin, currentY, 300, 20,
-            hwnd, (HMENU)ID_LBL_CURRENT_HK, GetModuleHandle(NULL), NULL);
+        // --- SETTINGS PAGE ---
 
-        currentY += 25;
+        state->lblSettingsTitle = CreateWindow(L"STATIC", L"Settings", WS_CHILD | SS_LEFT | SS_CENTERIMAGE,
+            margin, 16, 200, 32, hwnd, (HMENU)ID_LBL_SETTINGS_TITLE, GetModuleHandle(NULL), NULL);
 
-        CreateWindow(L"STATIC", L"Type New Hotkey:",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            margin, currentY, 200, 20,
-            hwnd, NULL, GetModuleHandle(NULL), NULL);
+        // Close Button (Top Right)
+        state->btnCloseSettings = CreateWindow(L"BUTTON", L"\u2715", WS_CHILD | BS_PUSHBUTTON | BS_OWNERDRAW,
+            clientW - 32 - margin, 16, 32, 32, hwnd, (HMENU)ID_BTN_CLOSE_SETTINGS, GetModuleHandle(NULL), NULL);
 
-        currentY += 20;
+        int setY = 90;
+        state->lblInstruction = CreateWindow(L"STATIC", L"Click the box below and press a key combination:", WS_CHILD | SS_LEFT,
+            margin, setY, 350, 20, hwnd, NULL, GetModuleHandle(NULL), NULL);
 
-        CreateWindow(L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER | ES_READONLY,
-            margin, currentY, 250, rowHeight,
-            hwnd, (HMENU)ID_HK_CONTROL, GetModuleHandle(NULL), NULL);
+        setY += 30;
+        state->hkControl = CreateWindow(L"EDIT", L"", WS_CHILD | WS_BORDER | ES_CENTER | ES_READONLY,
+            margin, setY, 250, 30, hwnd, (HMENU)ID_HK_CONTROL, GetModuleHandle(NULL), NULL);
 
-        // 3. FOOTER BUTTONS
-        int btnWidth = 120;
-        int btnHeight = 35;
-        int bottomY = winHeight - btnHeight - 45;
-
-        CreateWindow(L"BUTTON", L"Restore All",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
-            margin, bottomY, btnWidth, btnHeight,
-            hwnd, (HMENU)ID_BTN_RESTORE_ALL, GetModuleHandle(NULL), NULL);
-
-        CreateWindow(L"BUTTON", L"Exit",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW,
-            winWidth - btnWidth - margin - 15, bottomY, btnWidth, btnHeight,
-            hwnd, (HMENU)ID_BTN_EXIT, GetModuleHandle(NULL), NULL);
+        setY += 50;
+        state->lblCurrentHk = CreateWindow(L"STATIC", L"", WS_CHILD | SS_LEFT,
+            margin, setY, 300, 20, hwnd, (HMENU)ID_LBL_CURRENT_HK, GetModuleHandle(NULL), NULL);
 
         return 0;
     }
@@ -529,7 +590,23 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     case WM_SETFONT: {
         HFONT hFont = (HFONT)wParam;
         EnumChildWindows(hwnd, [](HWND child, LPARAM lparam) -> BOOL {
-            SendMessage(child, WM_SETFONT, (WPARAM)lparam, TRUE);
+            int id = GetDlgCtrlID(child);
+            APP_STATE* s = (APP_STATE*)GetWindowLongPtr(GetParent(child), GWLP_USERDATA);
+
+            if (!s) return TRUE;
+
+            if (id == ID_BTN_MENU || id == ID_BTN_CLOSE_SETTINGS) {
+                SendMessage(child, WM_SETFONT, (WPARAM)s->hFontHeader, TRUE);
+            }
+            else if (id == ID_LBL_SETTINGS_TITLE) {
+                SendMessage(child, WM_SETFONT, (WPARAM)s->hFontHeader, TRUE);
+            }
+            else if (id == ID_BTN_RESTORE_ALL || id == ID_BTN_EXIT) {
+                SendMessage(child, WM_SETFONT, (WPARAM)s->hFontBtn, TRUE);
+            }
+            else {
+                SendMessage(child, WM_SETFONT, (WPARAM)s->hFontUi, TRUE);
+            }
             return TRUE;
             }, (LPARAM)hFont);
         return 0;
@@ -537,8 +614,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
     case WM_ERASEBKGND: {
         HDC hdc = (HDC)wParam;
-        RECT rc;
-        GetClientRect(hwnd, &rc);
+        RECT rc; GetClientRect(hwnd, &rc);
         FillRect(hdc, &rc, state->hBrushBg);
         return 1;
     }
@@ -546,7 +622,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     case WM_CTLCOLORSTATIC: {
         HDC hdc = (HDC)wParam;
         SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, CLR_TEXT_WHITE);
+        wchar_t buff[32];
+        GetWindowText((HWND)lParam, buff, 32);
+        if (wcscmp(buff, L"Settings") == 0) {
+            SelectObject(hdc, state->hFontHeader);
+            SetTextColor(hdc, CLR_TEXT_WHITE);
+        }
+        else {
+            SetTextColor(hdc, CLR_TEXT_WHITE);
+        }
         return (LRESULT)state->hBrushBg;
     }
 
@@ -559,46 +643,55 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         break;
     }
 
-                    // --- Automatic Update Logic ---
-    case WM_UPDATE_HOTKEY: {
-        if (!state || !state->hkControl) break;
-        CUSTOM_HOTKEY_DATA* data = (CUSTOM_HOTKEY_DATA*)GetWindowLongPtr(state->hkControl, GWLP_USERDATA);
+    case WM_MOUSEMOVE: {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        auto CheckHover = [&](HWND hBtn, bool& currentFlag) {
+            RECT rc; GetWindowRect(hBtn, &rc);
+            MapWindowPoints(NULL, hwnd, (LPPOINT)&rc, 2);
+            bool isHover = PtInRect(&rc, pt);
+            if (isHover != currentFlag) {
+                currentFlag = isHover;
+                InvalidateButton(hBtn);
+                TRACKMOUSEEVENT tme = { sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0 };
+                TrackMouseEvent(&tme);
+            }
+            };
 
-        if (data && data->vKey != 0) {
-            // Just update internal state and label. 
-            // DO NOT register here, or we mask the key again while typing.
-            state->hkKey = data->vKey;
-            state->hkModifiers = data->modifiers;
-
-            SaveSettings(state);
-
-            std::wstring newLabel = L"Current Hotkey: " + GetHotkeyString(state->hkModifiers, state->hkKey);
-            SetDlgItemText(hwnd, ID_LBL_CURRENT_HK, newLabel.c_str());
+        if (state->isSettingsOpen) {
+            CheckHover(state->btnCloseSettings, state->isHoverCloseSett);
+        }
+        else {
+            CheckHover(state->btnRestore, state->isHoverRestore);
+            CheckHover(state->btnExit, state->isHoverExit);
+            CheckHover(state->btnMenu, state->isHoverMenu);
         }
         break;
     }
 
-                         // Unregister so user can type the key into the box
-    case WM_PAUSE_HOTKEY:
-        if (state) UnregisterHotKey(state->mainWindow, HOTKEY_ID);
+    case WM_MOUSELEAVE:
+        state->isHoverRestore = state->isHoverExit = state->isHoverMenu = state->isHoverCloseSett = false;
+        InvalidateRect(hwnd, NULL, FALSE);
         break;
 
-        // Re-register (activate) the key when focus leaves the box
-    case WM_RESUME_HOTKEY:
-        if (state) UpdateAppHotkey(state);
+    case WM_UPDATE_HOTKEY: {
+        if (!state || !state->hkControl) break;
+        CUSTOM_HOTKEY_DATA* data = (CUSTOM_HOTKEY_DATA*)GetWindowLongPtr(state->hkControl, GWLP_USERDATA);
+        if (data && data->vKey != 0) {
+            state->hkKey = data->vKey;
+            state->hkModifiers = data->modifiers;
+            SaveSettings(state);
+            std::wstring newLabel = L"Saved: " + GetHotkeyString(state->hkModifiers, state->hkKey);
+            SetWindowText(state->lblCurrentHk, newLabel.c_str());
+        }
         break;
+    }
+    case WM_PAUSE_HOTKEY: if (state) UnregisterHotKey(state->mainWindow, HOTKEY_ID); break;
+    case WM_RESUME_HOTKEY: if (state) UpdateAppHotkey(state); break;
 
-    case WM_ICON:
-        if (!state) break;
-        if (lParam == WM_LBUTTONDBLCLK) RestoreWindow(state, (UINT)wParam);
-        break;
-
+    case WM_ICON: if (state && lParam == WM_LBUTTONDBLCLK) RestoreWindow(state, (UINT)wParam); break;
     case WM_OURICON:
         if (!state) break;
-        if (LOWORD(lParam) == WM_LBUTTONDBLCLK) {
-            ShowWindow(hwnd, SW_SHOW);
-            SetForegroundWindow(hwnd);
-        }
+        if (LOWORD(lParam) == WM_LBUTTONDBLCLK) { ShowWindow(hwnd, SW_SHOW); SetForegroundWindow(hwnd); }
         else if (LOWORD(lParam) == WM_RBUTTONUP) {
             POINT pt; GetCursorPos(&pt);
             SetForegroundWindow(hwnd);
@@ -609,111 +702,103 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
     case WM_COMMAND: {
         int id = LOWORD(wParam);
-        if (id == ID_BTN_EXIT || id == ID_MENU_EXIT) {
-            PostQuitMessage(0);
-            return 0;
-        }
+        if (id == ID_BTN_EXIT || id == ID_MENU_EXIT) { PostQuitMessage(0); return 0; }
         if (!state) break;
 
-        if (id == ID_BTN_RESTORE_ALL || id == ID_MENU_RESTORE_ALL) {
-            RestoreAll(state);
+        // --- Navigation Logic ---
+        if (id == ID_BTN_MENU) {
+            HMENU hPop = CreatePopupMenu();
+            AppendMenu(hPop, MF_STRING, ID_MENU_OPEN_PREFS, L"Open Preferences");
+
+            RECT rc; GetWindowRect(state->btnMenu, &rc);
+            // Show below button
+            int selection = TrackPopupMenu(hPop, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
+                rc.left, rc.bottom, 0, hwnd, NULL);
+
+            if (selection == ID_MENU_OPEN_PREFS) {
+                std::wstring cur = L"Current: " + GetHotkeyString(state->hkModifiers, state->hkKey);
+                SetWindowText(state->lblCurrentHk, cur.c_str());
+                ToggleSettingsView(state, true);
+            }
+            DestroyMenu(hPop);
         }
+
+        if (id == ID_BTN_CLOSE_SETTINGS) {
+            ToggleSettingsView(state, false);
+        }
+
+        if (id == ID_BTN_RESTORE_ALL || id == ID_MENU_RESTORE_ALL) RestoreAll(state);
         break;
     }
 
     case WM_NOTIFY: {
         LPNMHDR lpnmh = (LPNMHDR)lParam;
         if (!state) break;
+        if (lpnmh->idFrom == ID_LIST_WINDOWS && lpnmh->code == NM_CUSTOMDRAW) HandleListCustomDraw(state, lParam);
         if (lpnmh->idFrom == ID_LIST_WINDOWS && lpnmh->code == NM_DBLCLK) {
             LPNMITEMACTIVATE lpnmitem = (LPNMITEMACTIVATE)lParam;
             if (lpnmitem->iItem != -1) {
-                LVITEM item = { 0 };
-                item.iItem = lpnmitem->iItem;
-                item.mask = LVIF_PARAM;
+                LVITEM item = { 0 }; item.iItem = lpnmitem->iItem; item.mask = LVIF_PARAM;
                 ListView_GetItem(state->listView, &item);
                 RestoreWindow(state, (UINT)item.lParam);
             }
         }
         break;
     }
-
-    case WM_CLOSE:
-        ShowWindow(hwnd, SW_HIDE);
-        return 0;
-
-    case WM_DESTROY:
-        PostQuitMessage(0);
-        return 0;
-
-    case WM_HOTKEY:
-        if (state && wParam == HOTKEY_ID) MinimizeToTray(state, NULL);
-        break;
-
-    default:
-        return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    case WM_CLOSE: ShowWindow(hwnd, SW_HIDE); return 0;
+    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_HOTKEY: if (state && wParam == HOTKEY_ID) MinimizeToTray(state, NULL); break;
+    default: return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
     return 0;
 }
 
 int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nShowCmd) {
-    UNREFERENCED_PARAMETER(hPrevInstance);
-    UNREFERENCED_PARAMETER(lpCmdLine);
-    UNREFERENCED_PARAMETER(nShowCmd);
-
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-
     HANDLE hMutex = CreateMutex(NULL, TRUE, L"TrayCaddy_Unique_Mutex");
-    if (hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (hMutex) CloseHandle(hMutex);
-        return 1;
-    }
+    if (hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) return 1;
 
     APP_STATE* appState = new APP_STATE();
     LoadSettings(appState);
-
-    appState->hFontUi = CreateModernFont(10, false);
     appState->hBrushBg = CreateSolidBrush(CLR_BG_DARK);
 
-    const wchar_t CLASS_NAME[] = L"TrayCaddy";
     WNDCLASS wc = { 0 };
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = CLASS_NAME;
+    wc.lpszClassName = L"TrayCaddy";
     wc.hbrBackground = appState->hBrushBg;
     wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101));
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClass(&wc);
 
-    appState->mainWindow = CreateWindow(CLASS_NAME, L"TrayCaddy",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 450, 400,
-        NULL, NULL, hInstance, appState);
+    // --- CALCULATE CORRECT WINDOW SIZE ---
+    // We want exactly 460x420 of usable client area.
+    RECT rc = { 0, 0, 460, 420 };
+    AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
 
-    if (!appState->mainWindow) {
-        if (hMutex) CloseHandle(hMutex);
-        delete appState;
-        return 1;
-    }
+    // Center on screen
+    int sW = GetSystemMetrics(SM_CXSCREEN);
+    int sH = GetSystemMetrics(SM_CYSCREEN);
+    int x = (sW - w) / 2;
+    int y = (sH - h) / 2;
 
-    appState->listView = GetDlgItem(appState->mainWindow, ID_LIST_WINDOWS);
-    appState->hkControl = GetDlgItem(appState->mainWindow, ID_HK_CONTROL);
+    appState->mainWindow = CreateWindow(L"TrayCaddy", L"TrayCaddy", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        x, y, w, h, NULL, NULL, hInstance, appState);
+
+    if (!appState->mainWindow) return 1;
 
     MakeCustomHotkeyControl(appState->hkControl, appState->hkModifiers, appState->hkKey);
-
     SendMessage(appState->mainWindow, WM_SETFONT, (WPARAM)appState->hFontUi, TRUE);
-
     InitTrayIcon(appState->mainWindow, hInstance, &appState->mainIcon);
     InitTrayMenu(&appState->trayMenu);
     UpdateAppHotkey(appState);
     LoadState(appState);
-
     ShowWindow(appState->mainWindow, SW_SHOW);
 
     MSG msg = { 0 };
-    while (GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
-    }
+    while (GetMessage(&msg, NULL, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
 
     RestoreAll(appState);
     Shell_NotifyIcon(NIM_DELETE, &appState->mainIcon);
@@ -721,10 +806,12 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     if (appState->trayMenu) DestroyMenu(appState->trayMenu);
 
     if (appState->hFontUi) DeleteObject(appState->hFontUi);
-    if (appState->hBrushBg) DeleteObject(appState->hBrushBg);
+    if (appState->hFontBtn) DeleteObject(appState->hFontBtn);
+    if (appState->hFontHeader) DeleteObject(appState->hFontHeader);
 
+    if (appState->hBrushBg) DeleteObject(appState->hBrushBg);
+    if (appState->hImageList) ImageList_Destroy(appState->hImageList);
     if (hMutex) CloseHandle(hMutex);
     delete appState;
-
     return (int)msg.wParam;
 }
