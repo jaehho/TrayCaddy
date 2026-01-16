@@ -36,12 +36,15 @@ const std::wstring SAVE_FILE = L"TrayCaddy.dat";
 struct HIDDEN_WINDOW {
     NOTIFYICONDATA icon = { 0 }; // Initialize to zero
     HWND window = nullptr;       // Initialize to null
+    UINT iconId = 0;
 };
 
 struct APP_STATE {
     HWND mainWindow = nullptr;   // FIX: Initialize member
     HMENU trayMenu = nullptr;    // FIX: Initialize member
     std::vector<HIDDEN_WINDOW> hiddenWindows;
+    UINT nextHiddenIconId = 1000;
+    NOTIFYICONDATA mainIcon = { 0 };
 };
 
 // --- Forward Declarations ---
@@ -52,6 +55,7 @@ void MinimizeToTray(APP_STATE* state, HWND targetWindow = NULL);
 void InitTrayIcon(HWND hWnd, HINSTANCE hInstance, NOTIFYICONDATA* icon);
 void InitTrayMenu(HMENU* trayMenu);
 void LoadState(APP_STATE* state);
+void ReaddHiddenIcons(APP_STATE* state);
 
 // --- Implementation ---
 
@@ -68,8 +72,25 @@ void SaveState(const APP_STATE* state) {
     for (const auto& item : state->hiddenWindows) {
         if (item.window && IsWindow(item.window)) {
             // Cast HWND to generic integer for storage
-            file << (uintptr_t)item.window << L",";
+            file << (uintptr_t)item.window << L"\n";
         }
+    }
+}
+
+void ReaddHiddenIcons(APP_STATE* state) {
+    if (!state) return;
+
+    state->hiddenWindows.erase(
+        std::remove_if(state->hiddenWindows.begin(), state->hiddenWindows.end(),
+            [](const HIDDEN_WINDOW& item) {
+                return !item.window || !IsWindow(item.window);
+            }),
+        state->hiddenWindows.end());
+
+    for (auto& item : state->hiddenWindows) {
+        Shell_NotifyIcon(NIM_ADD, &item.icon);
+        item.icon.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIcon(NIM_SETVERSION, &item.icon);
     }
 }
 
@@ -77,12 +98,12 @@ void SaveState(const APP_STATE* state) {
 void RestoreWindow(APP_STATE* state, WPARAM callbackId) {
     auto it = std::find_if(state->hiddenWindows.begin(), state->hiddenWindows.end(),
         [&](const HIDDEN_WINDOW& item) {
-            return item.icon.uID == (UINT)callbackId;
+            return item.iconId == (UINT)callbackId;
         });
 
     if (it != state->hiddenWindows.end()) {
         if (it->window && IsWindow(it->window)) {
-            ShowWindow(it->window, SW_SHOW);
+            ShowWindow(it->window, SW_RESTORE);
             SetForegroundWindow(it->window);
         }
         // Remove icon from system tray
@@ -99,7 +120,7 @@ void RestoreWindow(APP_STATE* state, WPARAM callbackId) {
 void RestoreAll(APP_STATE* state) {
     for (auto& item : state->hiddenWindows) {
         if (item.window && IsWindow(item.window)) {
-            ShowWindow(item.window, SW_SHOW);
+            ShowWindow(item.window, SW_RESTORE);
         }
         Shell_NotifyIcon(NIM_DELETE, &item.icon);
     }
@@ -136,8 +157,8 @@ void MinimizeToTray(APP_STATE* state, HWND targetWindow) {
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_ICON;
 
-    // IMPORTANT: We use the Window Handle (HWND) as the ID. 
-    nid.uID = (UINT)(UINT_PTR)currWin;
+    const UINT iconId = state->nextHiddenIconId++;
+    nid.uID = iconId;
 
     GetWindowText(currWin, nid.szTip, 128);
 
@@ -147,6 +168,7 @@ void MinimizeToTray(APP_STATE* state, HWND targetWindow) {
         HIDDEN_WINDOW newItem;
         newItem.icon = nid;
         newItem.window = currWin;
+        newItem.iconId = iconId;
         state->hiddenWindows.push_back(newItem);
 
         // Only save if this was a manual user action (not startup restoration)
@@ -164,7 +186,7 @@ void InitTrayIcon(HWND hWnd, HINSTANCE hInstance, NOTIFYICONDATA* icon) {
     if (!icon->hIcon) icon->hIcon = LoadIcon(NULL, IDI_APPLICATION);
 
     icon->uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP | NIF_MESSAGE;
-    icon->uID = (UINT)(UINT_PTR)hWnd;
+    icon->uID = 1;
     icon->uCallbackMessage = WM_OURICON;
     wcscpy_s(icon->szTip, L"TrayCaddy");
 
@@ -185,28 +207,21 @@ void LoadState(APP_STATE* state) {
     if (!std::filesystem::exists(SAVE_FILE)) return;
 
     std::wifstream file(SAVE_FILE);
-    std::wstring content;
-    std::getline(file, content); // Read entire line
-
-    if (content.empty()) return;
-
-    std::wstringstream ss(content);
-    std::wstring segment;
     int restoredCount = 0;
 
-    while (std::getline(ss, segment, L',')) {
-        if (!segment.empty()) {
-            try {
-                // Convert stored string back to HWND
-                uintptr_t val = std::stoull(segment);
-                HWND hwnd = (HWND)val;
-                if (IsWindow(hwnd)) {
-                    MinimizeToTray(state, hwnd);
-                    restoredCount++;
-                }
+    std::wstring line;
+    while (std::getline(file, line)) {
+        if (line.empty()) continue;
+        try {
+            // Convert stored string back to HWND
+            uintptr_t val = std::stoull(line);
+            HWND hwnd = (HWND)val;
+            if (IsWindow(hwnd)) {
+                MinimizeToTray(state, hwnd);
+                restoredCount++;
             }
-            catch (...) { /* Ignore malformed data */ }
         }
+        catch (...) { /* Ignore malformed data */ }
     }
 
     if (restoredCount > 0) {
@@ -218,6 +233,18 @@ void LoadState(APP_STATE* state) {
 // --- Main Window Procedure ---
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     APP_STATE* state = (APP_STATE*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    static UINT s_taskbarCreatedMsg = 0;
+    if (s_taskbarCreatedMsg == 0) {
+        s_taskbarCreatedMsg = RegisterWindowMessage(L"TaskbarCreated");
+    }
+
+    if (s_taskbarCreatedMsg != 0 && uMsg == s_taskbarCreatedMsg) {
+        if (state) {
+            InitTrayIcon(hwnd, GetModuleHandle(NULL), &state->mainIcon);
+        }
+        ReaddHiddenIcons(state);
+        return 0;
+    }
 
     switch (uMsg) {
     case WM_CREATE:
@@ -331,8 +358,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     SetWindowLongPtr(appState->mainWindow, GWLP_USERDATA, (LONG_PTR)appState);
 
     // Setup Main Icon
-    NOTIFYICONDATA mainIcon = { 0 };
-    InitTrayIcon(appState->mainWindow, hInstance, &mainIcon);
+    InitTrayIcon(appState->mainWindow, hInstance, &appState->mainIcon);
 
     InitTrayMenu(&appState->trayMenu);
 
@@ -352,7 +378,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
 
     // Cleanup
     RestoreAll(appState); // Restores windows, deletes file
-    Shell_NotifyIcon(NIM_DELETE, &mainIcon);
+    Shell_NotifyIcon(NIM_DELETE, &appState->mainIcon);
     UnregisterHotKey(appState->mainWindow, 1);
 
     // FIX: trayMenu is initialized now, but good to check before destroy
