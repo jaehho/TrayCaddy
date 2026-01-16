@@ -11,6 +11,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #include <windowsx.h>
 #include <shellapi.h>
 #include <commctrl.h> 
+#include <ShellScalingApi.h> // For DPI Awareness
 #include <string>
 #include <vector>
 #include <fstream>
@@ -22,6 +23,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "comctl32.lib") 
+#pragma comment(lib, "Shcore.lib") // Required for DPI scaling
 
 // --- Constants ---
 #define WM_ICON     0x1C0A
@@ -34,6 +36,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define ID_LIST_WINDOWS     0x202
 #define ID_HK_CONTROL       0x203
 #define ID_BTN_APPLY_HK     0x205
+#define ID_GRP_SETTINGS     0x206 // New Group Box ID
 
 #define ID_MENU_RESTORE_ALL 0x98
 #define ID_MENU_EXIT        0x99
@@ -51,8 +54,8 @@ struct HIDDEN_WINDOW {
 };
 
 struct CUSTOM_HOTKEY_DATA {
-    UINT modifiers; // MOD_WIN, MOD_CONTROL, etc.
-    UINT vKey;      // Virtual Key code
+    UINT modifiers;
+    UINT vKey;
 };
 
 struct APP_STATE {
@@ -67,8 +70,8 @@ struct APP_STATE {
     HFONT hFont = nullptr;
 
     // Hotkey Settings
-    UINT hkModifiers = MOD_WIN | MOD_SHIFT; // Default: Win + Shift
-    UINT hkKey = 0x5A;                      // Default: Z
+    UINT hkModifiers = MOD_WIN | MOD_SHIFT;
+    UINT hkKey = 0x5A;
 };
 
 // --- Forward Declarations ---
@@ -88,11 +91,8 @@ HFONT GetModernFont();
 
 // --- Custom Hotkey Control Implementation ---
 
-// Helper: Converts modifier flags and keycode into a readable string
 std::wstring GetHotkeyString(UINT modifiers, UINT key) {
     std::wstring text = L"";
-
-    // Order: Win -> Ctrl -> Shift -> Alt
     if (modifiers & MOD_WIN)     text += L"Win + ";
     if (modifiers & MOD_CONTROL) text += L"Ctrl + ";
     if (modifiers & MOD_SHIFT)   text += L"Shift + ";
@@ -101,66 +101,46 @@ std::wstring GetHotkeyString(UINT modifiers, UINT key) {
     if (key != 0) {
         wchar_t keyName[128] = { 0 };
         UINT scanCode = MapVirtualKey(key, MAPVK_VK_TO_VSC);
-
-        // Handle Extended Keys (Arrows, Home, End, etc.)
         switch (key) {
         case VK_LEFT: case VK_UP: case VK_RIGHT: case VK_DOWN:
         case VK_PRIOR: case VK_NEXT: case VK_END: case VK_HOME:
         case VK_INSERT: case VK_DELETE: case VK_DIVIDE: case VK_NUMLOCK:
             scanCode |= 0x100;
         }
-
-        if (GetKeyNameText(scanCode << 16, keyName, 128)) {
-            text += keyName;
-        }
-        else {
-            text += L"Unknown";
-        }
+        if (GetKeyNameText(scanCode << 16, keyName, 128)) text += keyName;
+        else text += L"Unknown";
     }
-    else {
-        text += L"None";
-    }
+    else text += L"None";
     return text;
 }
 
-// Subclass Procedure to intercept keys
 LRESULT CALLBACK CustomHotkeySubclass(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     switch (uMsg) {
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN: {
-        // 1. Identify Modifiers (Check Physical State)
         UINT modifiers = 0;
         if (GetKeyState(VK_LWIN) & 0x8000 || GetKeyState(VK_RWIN) & 0x8000) modifiers |= MOD_WIN;
         if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= MOD_CONTROL;
         if (GetKeyState(VK_SHIFT) & 0x8000)   modifiers |= MOD_SHIFT;
         if (GetKeyState(VK_MENU) & 0x8000)    modifiers |= MOD_ALT;
 
-        // 2. Identify Key
         UINT key = 0;
-        // Ignore if the key pressed is just a modifier itself
         if (wParam != VK_CONTROL && wParam != VK_SHIFT && wParam != VK_MENU && wParam != VK_LWIN && wParam != VK_RWIN) {
             key = (UINT)wParam;
         }
 
-        // 3. Update Display using Helper
         std::wstring text = GetHotkeyString(modifiers, key);
         SetWindowText(hWnd, text.c_str());
 
-        // 4. Save Data to Control Memory
         CUSTOM_HOTKEY_DATA* data = (CUSTOM_HOTKEY_DATA*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
         if (data) {
             data->modifiers = modifiers;
             data->vKey = key;
         }
-        return 0; // Handled
+        return 0;
     }
-
-    case WM_CHAR:
-    case WM_SYSCHAR:
-    case WM_KEYUP:
-    case WM_SYSKEYUP:
-        return 0; // Suppress output
-
+    case WM_CHAR: case WM_SYSCHAR: case WM_KEYUP: case WM_SYSKEYUP:
+        return 0;
     case WM_NCDESTROY:
         CUSTOM_HOTKEY_DATA* data = (CUSTOM_HOTKEY_DATA*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
         if (data) delete data;
@@ -174,13 +154,9 @@ void MakeCustomHotkeyControl(HWND hEdit, UINT defaultMod, UINT defaultKey) {
     CUSTOM_HOTKEY_DATA* data = new CUSTOM_HOTKEY_DATA();
     data->modifiers = defaultMod;
     data->vKey = defaultKey;
-
     SetWindowLongPtr(hEdit, GWLP_USERDATA, (LONG_PTR)data);
     SetWindowSubclass(hEdit, CustomHotkeySubclass, 0, 0);
-
-    // FIX: Set initial text manually based on loaded settings
-    std::wstring initialText = GetHotkeyString(defaultMod, defaultKey);
-    SetWindowText(hEdit, initialText.c_str());
+    SetWindowText(hEdit, GetHotkeyString(defaultMod, defaultKey).c_str());
 }
 
 // --- Logic Implementation ---
@@ -212,7 +188,7 @@ void LoadSettings(APP_STATE* state) {
 void UpdateAppHotkey(APP_STATE* state) {
     UnregisterHotKey(state->mainWindow, HOTKEY_ID);
     if (!RegisterHotKey(state->mainWindow, HOTKEY_ID, state->hkModifiers | MOD_NOREPEAT, state->hkKey)) {
-        MessageBox(state->mainWindow, L"Failed to register hotkey. It might be in use by another application.", L"Error", MB_ICONWARNING);
+        MessageBox(state->mainWindow, L"Failed to register hotkey.", L"Error", MB_ICONWARNING);
     }
 }
 
@@ -220,9 +196,7 @@ void ReaddHiddenIcons(APP_STATE* state) {
     if (!state) return;
     state->hiddenWindows.erase(
         std::remove_if(state->hiddenWindows.begin(), state->hiddenWindows.end(),
-            [](const HIDDEN_WINDOW& item) {
-                return !item.window || !IsWindow(item.window);
-            }),
+            [](const HIDDEN_WINDOW& item) { return !item.window || !IsWindow(item.window); }),
         state->hiddenWindows.end());
 
     for (auto& item : state->hiddenWindows) {
@@ -267,9 +241,7 @@ void RestoreWindow(APP_STATE* state, UINT iconId) {
 
 void RestoreAll(APP_STATE* state) {
     for (auto& item : state->hiddenWindows) {
-        if (item.window && IsWindow(item.window)) {
-            ShowWindow(item.window, SW_RESTORE);
-        }
+        if (item.window && IsWindow(item.window)) ShowWindow(item.window, SW_RESTORE);
         Shell_NotifyIcon(NIM_DELETE, &item.icon);
     }
     state->hiddenWindows.clear();
@@ -292,10 +264,8 @@ void MinimizeToTray(APP_STATE* state, HWND targetWindow) {
     }
 
     HICON hIcon = (HICON)GetClassLongPtr(currWin, GCLP_HICONSM);
-    if (!hIcon) {
-        hIcon = (HICON)SendMessage(currWin, WM_GETICON, ICON_SMALL, 0);
-        if (!hIcon) hIcon = LoadIcon(NULL, IDI_APPLICATION);
-    }
+    if (!hIcon) hIcon = (HICON)SendMessage(currWin, WM_GETICON, ICON_SMALL, 0);
+    if (!hIcon) hIcon = LoadIcon(NULL, IDI_APPLICATION);
 
     NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA) };
     nid.hWnd = state->mainWindow;
@@ -351,9 +321,7 @@ void LoadState(APP_STATE* state) {
         try {
             uintptr_t val = std::stoull(line);
             HWND hwnd = (HWND)val;
-            if (IsWindow(hwnd)) {
-                MinimizeToTray(state, hwnd);
-            }
+            if (IsWindow(hwnd)) MinimizeToTray(state, hwnd);
         }
         catch (...) {}
     }
@@ -363,6 +331,7 @@ void LoadState(APP_STATE* state) {
 HFONT GetModernFont() {
     NONCLIENTMETRICS ncm = { sizeof(NONCLIENTMETRICS) };
     SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICS), &ncm, 0);
+    // Create a slightly larger font for better readability if desired, or keep default
     return CreateFontIndirect(&ncm.lfMessageFont);
 }
 
@@ -382,60 +351,76 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
     switch (uMsg) {
     case WM_CREATE: {
-        // NOTE: state is NULL here. Controls are initialized without accessing state.
         INITCOMMONCONTROLSEX icex;
         icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
         icex.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES;
         InitCommonControlsEx(&icex);
 
-        int padding = 10;
-        int winWidth = 340;
-        int listHeight = 160;
-        int rowHeight = 25;
-        int currentY = padding;
+        // Layout Constants
+        const int margin = 15;
+        const int winWidth = 400;  // Slightly wider
+        const int rowHeight = 25;
+        const int btnHeight = 30;
 
-        // List View
+        int currentY = margin;
+
+        // 1. LIST VIEW (Full width minus margins)
+        int listHeight = 180;
         HWND hList = CreateWindow(WC_LISTVIEW, L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-            padding, currentY, winWidth - (padding * 2), listHeight,
+            margin, currentY, winWidth - (margin * 2), listHeight,
             hwnd, (HMENU)ID_LIST_WINDOWS, GetModuleHandle(NULL), NULL);
-        currentY += listHeight + padding;
 
         LVCOLUMN lvc;
         lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT;
         lvc.fmt = LVCFMT_LEFT;
-        lvc.cx = winWidth - (padding * 2) - 4;
+        lvc.cx = winWidth - (margin * 2) - 4; // Adjust for scrollbar
         lvc.pszText = (LPWSTR)L"Window Title";
         ListView_InsertColumn(hList, 0, &lvc);
-        ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
 
-        // --- Hotkey Section ---
-        CreateWindow(L"STATIC", L"Shortcut:", WS_CHILD | WS_VISIBLE,
-            padding, currentY + 4, 60, 20, hwnd, NULL, GetModuleHandle(NULL), NULL);
+        currentY += listHeight + margin;
 
-        // Standard EDIT control (Will be subclassed in wWinMain)
+        // 2. SETTINGS GROUP BOX
+        int grpHeight = 65;
+        CreateWindow(L"BUTTON", L"Settings",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            margin, currentY, winWidth - (margin * 2), grpHeight,
+            hwnd, (HMENU)ID_GRP_SETTINGS, GetModuleHandle(NULL), NULL);
+
+        // Coordinates inside the group box context
+        int grpInnerY = currentY + 25;
+        int grpInnerX = margin + 15;
+        int grpContentWidth = winWidth - (margin * 2) - 30;
+
+        // Label: "Trigger Hotkey:"
+        CreateWindow(L"STATIC", L"Tray Hotkey:", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+            grpInnerX, grpInnerY, 80, rowHeight, hwnd, NULL, GetModuleHandle(NULL), NULL);
+
+        // Hotkey Edit Box
         CreateWindow(L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER | ES_READONLY,
-            70, currentY, 200, rowHeight,
+            grpInnerX + 85, grpInnerY, 190, rowHeight,
             hwnd, (HMENU)ID_HK_CONTROL, GetModuleHandle(NULL), NULL);
 
-        CreateWindow(L"BUTTON", L"Set",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT,
-            winWidth - 55 - padding, currentY, 55, rowHeight,
+        // Apply Button
+        CreateWindow(L"BUTTON", L"Apply",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            grpInnerX + 85 + 190 + 10, grpInnerY, 60, rowHeight,
             hwnd, (HMENU)ID_BTN_APPLY_HK, GetModuleHandle(NULL), NULL);
 
-        currentY += rowHeight + padding;
+        currentY += grpHeight + margin;
 
-        // --- Action Buttons ---
-        int btnWidth = 100;
+        // 3. ACTION BUTTONS (Bottom aligned)
+        int btnWidth = 110;
         CreateWindow(L"BUTTON", L"Restore All",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT,
-            padding, currentY, btnWidth, 30,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            margin, currentY, btnWidth, btnHeight,
             hwnd, (HMENU)ID_BTN_RESTORE_ALL, GetModuleHandle(NULL), NULL);
 
-        CreateWindow(L"BUTTON", L"Exit App",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT,
-            winWidth - btnWidth - padding, currentY, btnWidth, 30,
+        CreateWindow(L"BUTTON", L"Exit",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            winWidth - btnWidth - margin, currentY, btnWidth, btnHeight,
             hwnd, (HMENU)ID_BTN_EXIT, GetModuleHandle(NULL), NULL);
 
         return 0;
@@ -471,21 +456,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
     case WM_COMMAND: {
         int id = LOWORD(wParam);
-
         if (id == ID_BTN_EXIT || id == ID_MENU_EXIT) {
             PostQuitMessage(0);
             return 0;
         }
-
-        if (!state) break; // Guard Clause
+        if (!state) break;
 
         if (id == ID_BTN_RESTORE_ALL || id == ID_MENU_RESTORE_ALL) {
             RestoreAll(state);
         }
         else if (id == ID_BTN_APPLY_HK) {
-            // Retrieve Data from the Custom Control
             CUSTOM_HOTKEY_DATA* data = (CUSTOM_HOTKEY_DATA*)GetWindowLongPtr(state->hkControl, GWLP_USERDATA);
-
             if (data && data->vKey != 0) {
                 state->hkKey = data->vKey;
                 state->hkModifiers = data->modifiers;
@@ -503,17 +484,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     case WM_NOTIFY: {
         LPNMHDR lpnmh = (LPNMHDR)lParam;
         if (!state) break;
-
-        if (lpnmh->idFrom == ID_LIST_WINDOWS) {
-            if (lpnmh->code == NM_DBLCLK) {
-                LPNMITEMACTIVATE lpnmitem = (LPNMITEMACTIVATE)lParam;
-                if (lpnmitem->iItem != -1) {
-                    LVITEM item = { 0 };
-                    item.iItem = lpnmitem->iItem;
-                    item.mask = LVIF_PARAM;
-                    ListView_GetItem(state->listView, &item);
-                    RestoreWindow(state, (UINT)item.lParam);
-                }
+        if (lpnmh->idFrom == ID_LIST_WINDOWS && lpnmh->code == NM_DBLCLK) {
+            LPNMITEMACTIVATE lpnmitem = (LPNMITEMACTIVATE)lParam;
+            if (lpnmitem->iItem != -1) {
+                LVITEM item = { 0 };
+                item.iItem = lpnmitem->iItem;
+                item.mask = LVIF_PARAM;
+                ListView_GetItem(state->listView, &item);
+                RestoreWindow(state, (UINT)item.lParam);
             }
         }
         break;
@@ -531,9 +509,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if (state && wParam == HOTKEY_ID) MinimizeToTray(state, NULL);
         break;
 
+        // --- Paint Handling for Polish ---
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORBTN:
+    {
+        // Make text labels transparent so they don't have a gray box background
+        // on the white window.
+        HDC hdc = (HDC)wParam;
+        SetBkMode(hdc, TRANSPARENT);
         return (LRESULT)GetStockObject(WHITE_BRUSH);
+    }
 
     default:
         return DefWindowProc(hwnd, uMsg, wParam, lParam);
@@ -545,6 +530,9 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
     UNREFERENCED_PARAMETER(nShowCmd);
+
+    // --- ENABLE HIGH DPI AWARENESS (Critical for modern screens) ---
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     HANDLE hMutex = CreateMutex(NULL, TRUE, L"TrayCaddy_Unique_Mutex");
     if (hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -566,10 +554,13 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClass(&wc);
 
-    // Create Main Window 
+    // Calculate window size (Wider and Taller)
+    int width = 430; // 400 content + borders
+    int height = 360;
+
     appState->mainWindow = CreateWindow(CLASS_NAME, L"TrayCaddy",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 360, 320,
+        CW_USEDEFAULT, CW_USEDEFAULT, width, height,
         NULL, NULL, hInstance, NULL);
 
     if (!appState->mainWindow) {
@@ -579,22 +570,17 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     }
 
     SetWindowLongPtr(appState->mainWindow, GWLP_USERDATA, (LONG_PTR)appState);
-
-    // Get Handles to Controls
     appState->listView = GetDlgItem(appState->mainWindow, ID_LIST_WINDOWS);
     appState->hkControl = GetDlgItem(appState->mainWindow, ID_HK_CONTROL);
 
-    // --- APPLY THE CUSTOM HOTKEY SUBCLASS ---
     MakeCustomHotkeyControl(appState->hkControl, appState->hkModifiers, appState->hkKey);
-
-    SendMessage(appState->mainWindow, WM_SETFONT, 0, 0);
+    SendMessage(appState->mainWindow, WM_SETFONT, (WPARAM)appState->hFont, TRUE);
 
     InitTrayIcon(appState->mainWindow, hInstance, &appState->mainIcon);
     InitTrayMenu(&appState->trayMenu);
-
-    UpdateAppHotkey(appState); // Register the hotkey
-
+    UpdateAppHotkey(appState);
     LoadState(appState);
+
     ShowWindow(appState->mainWindow, SW_SHOW);
 
     MSG msg = { 0 };
