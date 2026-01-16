@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="TrayCaddy/TrayCaddy.vcxproj" />
+  <Project Path="TrayCaddy/TrayCaddy.vcxproj" Id="3c29df9d-b2be-46e4-8190-8fa6d905d0a2" />
 </Solution>
